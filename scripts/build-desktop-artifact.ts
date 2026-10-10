@@ -2561,6 +2561,29 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
   };
 });
 
+// A self-signed certificate has no Apple Team ID, so the app cannot be notarized,
+// and hardened runtime library validation would reject the app's own frameworks.
+// Squirrel.Mac still accepts updates because the designated requirement pins the
+// certificate, which stays the same across builds.
+export const resolveMacSelfSignedSigningConfig = Effect.fn("resolveMacSelfSignedSigningConfig")(
+  function* (signed: boolean) {
+    const path = yield* Path.Path;
+    const repoRoot = yield* RepoRoot;
+    const configuredIdentity = yield* Config.String("T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY").pipe(
+      Config.option,
+    );
+    const identity = Option.getOrUndefined(configuredIdentity)?.trim();
+    if (signed || !identity) return {};
+
+    return {
+      identity,
+      hardenedRuntime: false,
+      notarize: false,
+      sign: path.join(repoRoot, "scripts/sign-macos.ts"),
+    };
+  },
+);
+
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
 }
@@ -2686,6 +2709,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "mac") {
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    const macSelfSignedSigningConfig = yield* resolveMacSelfSignedSigningConfig(signed);
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
@@ -2701,6 +2725,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      ...macSelfSignedSigningConfig,
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,

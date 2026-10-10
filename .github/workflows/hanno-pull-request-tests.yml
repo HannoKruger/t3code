@@ -47,7 +47,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          vp install --filter=@t3tools/web... --filter=@t3tools/desktop...
+          vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
           vp run --filter @t3tools/desktop ensure:electron
 
       - name: Test carried upstream pull requests

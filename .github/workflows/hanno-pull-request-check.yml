@@ -1,0 +1,97 @@
+# Required check for pull requests into hanno. A sync/<tag> pull request
+# merges an upstream tag that the sync could not merge by itself, and may
+# auto-merge once this passes, so it gets the same checks the sync applies.
+# It runs on pull_request (never pull_request_target), with a read-only token
+# and no environment, so nothing in it can reach the fork's secrets.
+name: Hanno pull request check
+
+on:
+  pull_request:
+    branches:
+      - hanno
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hanno-pull-request-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_REPOSITORY: pingdotgg/t3code
+  FORK_BRANCH: hanno
+  HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+  HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  verify:
+    name: Verify pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Accept only branches of this repository
+        run: |
+          if [[ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
+            echo "::error::Pull requests into $FORK_BRANCH must come from a branch of $GITHUB_REPOSITORY, not $HEAD_REPOSITORY."
+            exit 1
+          fi
+
+      - name: Checkout
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git remote add upstream "${GITHUB_SERVER_URL}/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags origin "$HEAD_SHA" "+refs/heads/$FORK_BRANCH:refs/remotes/origin/$FORK_BRANCH"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach "$HEAD_SHA"
+
+      # The pull request may change the script, so the copy from hanno decides.
+      - name: Verify a sync branch like the sync does
+        if: startsWith(github.event.pull_request.head.ref, 'sync/')
+        run: |
+          set -euo pipefail
+          tag="${HEAD_BRANCH#sync/}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Branch $HEAD_BRANCH must be named sync/<stable upstream tag>, for example sync/v0.0.46."
+            exit 1
+          fi
+          git fetch --no-tags upstream "+refs/tags/$tag:refs/tags/$tag"
+          git show "origin/$FORK_BRANCH:.github/scripts/hanno-sync.sh" > "$RUNNER_TEMP/hanno-sync.sh"
+          bash "$RUNNER_TEMP/hanno-sync.sh" check-sync-branch "origin/$FORK_BRANCH" "$HEAD_SHA" "$tag"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install dependencies
+        run: |
+          vp install --filter=@t3tools/web... --filter=@t3tools/desktop...
+          vp run --filter @t3tools/desktop ensure:electron
+
+      - name: Test carried upstream pull requests
+        run: |
+          set -euo pipefail
+          mapfile -t test_files < <(
+            git log --format=%H --grep='^Carried-Pull-Request: ' HEAD |
+              xargs -r -n 1 git show --name-only --format= |
+              grep -E '^apps/web/.*\.test\.tsx?$' | sort -u |
+              while read -r file; do [[ -f "$file" ]] && echo "${file#apps/web/}"; done
+          )
+          if (( ${#test_files[@]} == 0 )); then
+            echo "No carried pull request has web tests."
+            exit 0
+          fi
+          cd apps/web && vp test run --project unit "${test_files[@]}"
+
+      - name: Typecheck web
+        run: vp run --filter @t3tools/web typecheck
+
+      - name: Typecheck desktop
+        run: vp run --filter @t3tools/desktop typecheck

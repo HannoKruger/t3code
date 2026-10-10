@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
-# Steps of .github/workflows/hanno-sync.yml, kept here so they can run locally.
-# Each command reads its inputs from the environment and writes results to
-# $GITHUB_OUTPUT (or stdout when that is unset).
+# Steps of .github/workflows/hanno-sync.yml and hanno-pull-request-check.yml,
+# kept here so they can run locally. Each command reads its inputs from the
+# environment and writes results to $GITHUB_OUTPUT (or stdout when unset).
 #
-# Upstream pull requests are carried as ordinary commits on the fork branch,
-# committed after review, with a "Carried-Pull-Request: <number>" trailer.
-# Nothing is fetched from a pull request at sync time, because its author can
-# push anything to it and the result would ship as a signed update.
+# The fork merges each stable upstream tag into its branch with a merge
+# commit, so the fork's own commits, including carried upstream pull requests
+# ("Carried-Pull-Request: <number>" trailer), are never rewritten.
 set -euo pipefail
 
 : "${FORK_BRANCH:=hanno}"
-: "${UPSTREAM_REPOSITORY:=pingdotgg/t3code}"
 : "${GITHUB_OUTPUT:=/dev/stdout}"
 : "${WORK_DIRECTORY:=${RUNNER_TEMP:-/tmp}}"
 
-FORK_WORKFLOWS=(.github/workflows/hanno-release.yml .github/workflows/hanno-sync.yml)
-# Any workflow or action file can read this repository's secrets, so a rebase
-# may never add or change one. Only the fork's own commits decide what runs.
+FORK_WORKFLOWS=(.github/workflows/hanno-release.yml .github/workflows/hanno-sync.yml .github/workflows/hanno-pull-request-check.yml)
+# Any workflow or action file can read this repository's secrets, so upstream
+# content may never add or change one. Only the fork's own commits decide what runs.
 GUARDED_PATHS=(.github/workflows .github/actions .github/scripts/hanno-sync.sh)
 
 newest_stable_tag() {
@@ -24,38 +22,6 @@ newest_stable_tag() {
     sed 's#.*refs/tags/##' |
     grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
     sort -V | tail -n 1
-}
-
-# A pull request merged into main after the tag was cut is not in the tag, so
-# dropping its carried copy then would ship the tag without the feature.
-is_pull_request_in_tag() {
-  local pull_request="$1" tag="$2" merge_commit
-  merge_commit="$(gh pr view "$pull_request" -R "$UPSTREAM_REPOSITORY" --json mergeCommit --jq '.mergeCommit.oid // empty')"
-  [[ -n "$merge_commit" ]] && git merge-base --is-ancestor "$merge_commit" "$tag" 2>/dev/null
-}
-
-carried_pull_request_of() {
-  git log -1 --format='%(trailers:key=Carried-Pull-Request,valueonly)' "$1" | head -n 1
-}
-
-# Once a tag contains a carried pull request, upstream's reviewed version can
-# differ from the carried copy, so the copy is dropped instead of rebased.
-carried_commits_in_tag() {
-  local base="$1" tag="$2" commit pull_request
-  for commit in $(git rev-list "$base..$FORK_BRANCH"); do
-    pull_request="$(carried_pull_request_of "$commit")"
-    if [[ -n "$pull_request" ]] && is_pull_request_in_tag "$pull_request" "$tag"; then
-      echo "$commit"
-    fi
-  done
-}
-
-sequence_editor_dropping() {
-  local script="" commit
-  for commit in "$@"; do
-    script+="/^pick $(git rev-parse --short "$commit")/d;"
-  done
-  echo "sed -i -E '${script:-b}'"
 }
 
 unresolved_files() {
@@ -70,67 +36,99 @@ is_fork_workflow() {
   return 1
 }
 
-# The fork deletes upstream's workflows and actions. When upstream edits one,
-# the rebase stops on a modify/delete conflict, which keeping it deleted solves.
+is_upstream_automation() {
+  local file="$1"
+  [[ "$file" == .github/actions/* ]] ||
+    { [[ "$file" == .github/workflows/* ]] && ! is_fork_workflow "$file"; }
+}
+
+# The fork deletes upstream's workflows and actions. A merge brings back the
+# ones upstream added or edited since, so they are deleted again before the
+# merge commit is made.
 keep_upstream_automation_deleted() {
   local file
   while read -r file; do
-    if [[ "$file" == .github/actions/* ]] ||
-      { [[ "$file" == .github/workflows/* ]] && ! is_fork_workflow "$file"; }; then
-      git rm --quiet --force -- "$file"
+    if is_upstream_automation "$file"; then
+      git rm --quiet --force --ignore-unmatch -- "$file"
     fi
-  done < <(unresolved_files)
+  done < <(git diff --name-only --cached HEAD -- .github/workflows .github/actions; unresolved_files)
 }
 
-# rerere replays conflict resolutions recorded in earlier runs. A stop that
-# rerere or keep_upstream_automation_deleted fully resolved continues on its
-# own; anything else is a real conflict.
-continue_rebase_while_resolved() {
-  while [[ -d "$(git rev-parse --git-path rebase-merge)" ]]; do
-    keep_upstream_automation_deleted
-    if [[ -n "$(unresolved_files)" ]]; then
-      return 1
-    fi
-    git add --all
-    GIT_EDITOR=true git rebase --continue || true
-  done
-}
-
-rebase() {
-  local newest_tag base
+merge() {
+  local newest_tag
   git config rerere.enabled true
   git config rerere.autoUpdate true
   newest_tag="$(newest_stable_tag)"
   git fetch --no-tags upstream "+refs/tags/$newest_tag:refs/tags/$newest_tag"
   echo "upstream_tag=$newest_tag" >> "$GITHUB_OUTPUT"
 
-  base="$(git merge-base "$FORK_BRANCH" "$newest_tag")"
-  if [[ "$base" == "$(git rev-parse "$newest_tag^{commit}")" ]]; then
-    echo "$FORK_BRANCH is already based on $newest_tag." >&2
+  if git merge-base --is-ancestor "$newest_tag" HEAD; then
+    echo "$FORK_BRANCH already contains $newest_tag." >&2
     return 0
   fi
 
-  local -a dropped
-  mapfile -t dropped < <(carried_commits_in_tag "$base" "$newest_tag")
-  if GIT_SEQUENCE_EDITOR="$(sequence_editor_dropping "${dropped[@]}")" \
-    git rebase --interactive --empty=drop --onto "$newest_tag" "$base" "$FORK_BRANCH" ||
-    continue_rebase_while_resolved; then
+  git merge --no-ff --no-commit -m "Merge upstream $newest_tag into $FORK_BRANCH" "$newest_tag" || true
+  keep_upstream_automation_deleted
+  if [[ -n "$(unresolved_files)" ]]; then
+    unresolved_files > "$WORK_DIRECTORY/conflicts.txt"
+    git merge --abort
+    echo "conflict=true" >> "$GITHUB_OUTPUT"
     return 0
   fi
+  git commit --quiet --no-edit
+}
 
-  unresolved_files > "$WORK_DIRECTORY/conflicts.txt"
-  git rebase --abort
-  echo "conflict=true" >> "$GITHUB_OUTPUT"
+guarded_changes() {
+  git diff --name-only "$1" "$2" -- "${GUARDED_PATHS[@]}"
 }
 
 check_fork_paths() {
   local before="$1"
-  git diff --name-only "$before" HEAD -- "${GUARDED_PATHS[@]}" > "$WORK_DIRECTORY/conflicts.txt"
+  guarded_changes "$before" HEAD > "$WORK_DIRECTORY/conflicts.txt"
   if [[ -s "$WORK_DIRECTORY/conflicts.txt" ]]; then
-    echo "The rebase added or changed workflow files; refusing to publish." >&2
+    echo "The merge added or changed workflow files; refusing to publish." >&2
     git reset --quiet --hard "$before"
     echo "conflict=true" >> "$GITHUB_OUTPUT"
   fi
+}
+
+refuse() {
+  echo "::error::$1" >&2
+  return 1
+}
+
+without_upstream_automation() {
+  local file
+  while read -r file; do
+    is_upstream_automation "$file" || echo "$file"
+  done
+}
+
+# Files the fork changes relative to the upstream release it is based on.
+fork_changed_files() {
+  local base="$1"
+  git diff --name-only "$(git merge-base "$base" "$2")" "$base"
+}
+
+# A sync pull request merges an upstream tag into the fork branch. It may only
+# resolve conflicts in files the fork already changes, so everything else stays
+# exactly as upstream released it.
+check_sync_branch() {
+  local base="$1" head="$2" tag="$3" outside_fork_files
+  git rev-parse --verify --quiet "$tag^{commit}" > /dev/null ||
+    refuse "Upstream tag $tag does not exist."
+  git merge-base --is-ancestor "$tag" "$head" ||
+    refuse "The branch does not contain $tag."
+  git merge-base --is-ancestor "$base" "$head" ||
+    refuse "The branch does not contain the current $FORK_BRANCH, so it would drop fork commits."
+  if [[ -n "$(guarded_changes "$base" "$head")" ]]; then
+    refuse "The branch changes workflow, action or sync script files: $(guarded_changes "$base" "$head" | tr '\n' ' ')"
+  fi
+  outside_fork_files="$(comm -23 <(git diff --name-only "$tag" "$head" | without_upstream_automation | sort) <(fork_changed_files "$base" "$tag" | sort))"
+  if [[ -n "$outside_fork_files" ]]; then
+    refuse "The branch differs from $tag in files the fork does not change: $(echo "$outside_fork_files" | tr '\n' ' ')"
+  fi
+  echo "The branch merges $tag into $FORK_BRANCH and keeps every fork commit." >&2
 }
 
 decide_release() {
@@ -139,8 +137,8 @@ decide_release() {
   head_sha="$(git rev-parse HEAD)"
   latest_fork_tag="$(git tag -l "v$upstream_version-hanno.*" | sort -V | tail -n 1)"
   if [[ -n "$latest_fork_tag" ]]; then
-    if [[ "$(git rev-parse "$latest_fork_tag^{commit}")" == "$head_sha" ]]; then
-      echo "$latest_fork_tag already ships $head_sha." >&2
+    if git diff --quiet "$latest_fork_tag" "$head_sha" -- . ':(exclude).github'; then
+      echo "$latest_fork_tag already ships everything but .github at $head_sha." >&2
       return 0
     fi
     build_number=$((${latest_fork_tag##*-hanno.} + 1))
@@ -150,11 +148,12 @@ decide_release() {
 }
 
 case "${1:-}" in
-  rebase) rebase ;;
+  merge) merge ;;
   check-fork-paths) check_fork_paths "$2" ;;
+  check-sync-branch) check_sync_branch "$2" "$3" "$4" ;;
   decide-release) decide_release "$2" ;;
   *)
-    echo "usage: $0 rebase | check-fork-paths <commit-before-rebase> | decide-release <upstream-tag>" >&2
+    echo "usage: $0 merge | check-fork-paths <commit-before-merge> | check-sync-branch <base> <head> <upstream-tag> | decide-release <upstream-tag>" >&2
     exit 64
     ;;
 esac

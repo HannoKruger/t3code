@@ -1,0 +1,72 @@
+# Runs the pull request's own code: the carried upstream pull requests' tests
+# and the web and desktop typechecks. It is a required check too, but it cannot
+# weaken the gate: hanno-pull-request-check.yml refuses any pull request that
+# changes this file, so the version that runs is always hanno's.
+name: Hanno pull request tests
+
+on:
+  pull_request:
+    branches:
+      - hanno
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hanno-pull-request-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  test:
+    name: Test pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
+      # .repos tree, so this checks out by hand and leaves .repos out.
+      - name: Checkout
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --quiet --no-tags origin "$HEAD_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --quiet --detach "$HEAD_SHA"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install dependencies
+        run: |
+          vp install --filter=@t3tools/web... --filter=@t3tools/desktop...
+          vp run --filter @t3tools/desktop ensure:electron
+
+      - name: Test carried upstream pull requests
+        run: |
+          set -euo pipefail
+          mapfile -t test_files < <(
+            git log --format=%H --grep='^Carried-Pull-Request: ' HEAD |
+              xargs -r -n 1 git show --name-only --format= |
+              grep -E '^apps/web/.*\.test\.tsx?$' | sort -u |
+              while read -r file; do [[ -f "$file" ]] && echo "${file#apps/web/}"; done
+          )
+          if (( ${#test_files[@]} == 0 )); then
+            echo "No carried pull request has web tests."
+            exit 0
+          fi
+          cd apps/web && vp test run --project unit "${test_files[@]}"
+
+      - name: Typecheck web
+        run: vp run --filter @t3tools/web typecheck
+
+      - name: Typecheck desktop
+        run: vp run --filter @t3tools/desktop typecheck

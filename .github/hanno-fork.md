@@ -25,18 +25,24 @@ environment.
    assigned to Agent in Todo on Claude Sonnet, and starts it.
 3. The agent merges the tag on branch `sync/<tag>` (exactly that name), from `origin/hanno`, resolves the conflicts,
    runs the checks, opens a pull request into `hanno` and turns on auto-merge with a merge commit.
-4. `hanno-pull-request-check.yml` is the required check for pull requests into `hanno`. It runs on `pull_request` with a
-   read-only token and no environment. It accepts only branches of this repository. For a `sync/<tag>` branch it runs
-   `hanno-sync.sh check-sync-branch` from `hanno`: the branch contains the tag and the whole current `hanno`, changes no
-   workflow, action or sync script file, and differs from the tag only in files the fork already changes. Then it runs
-   the carried pull requests' tests and the web and desktop typechecks.
+4. Two required checks run on the pull request. `hanno-pull-request-check.yml` ("Verify pull request") runs on
+   `pull_request_target`, so its definition always comes from `hanno`, with a read-only token, no secret and no
+   environment. It never runs the pull request's code: it fetches the head as git data and runs `hanno`'s copy of
+   `hanno-sync.sh check-pull-request`. That accepts only a branch of this repository named `sync/<tag>`, where the tag
+   is the newest stable upstream tag and not yet in `hanno`, the branch contains the tag and the whole current `hanno`,
+   changes no workflow, action or sync script file, and differs from the tag only in files the fork changes relative to
+   the upstream tag `hanno` was last synced to. Renames count as a deletion plus an addition.
+   `hanno-pull-request-tests.yml` ("Test pull request") runs the pull request's code on `pull_request`: the carried pull
+   requests' tests and the web and desktop typechecks. The gate refuses any change to that file, so it cannot be weakened.
 5. Auto-merge lands the pull request. That push starts the sync, which finds the tag merged and publishes the release.
 
 ## Rules on `hanno`
 
 A repository ruleset protects `hanno`: no deletion, no force-push, changes only through a pull request merged with a
-merge commit, and the check "Verify pull request" must pass. Only the sync's deploy key (GitHub environment `sync`)
-bypasses it, for its own clean merges. Fork changes by hand go through a pull request too.
+merge commit, and the checks "Verify pull request" and "Test pull request" must pass. Only the sync's deploy key
+(GitHub environment `sync`) bypasses it, for its own clean merges. Since only `sync/<tag>` pull requests pass the gate,
+changing the fork's own commits or workflows means turning the ruleset off (Settings, Rules), pushing, and turning it
+back on. A push that changes workflow files publishes nothing from its own sync run.
 
 ## Carried upstream pull requests
 

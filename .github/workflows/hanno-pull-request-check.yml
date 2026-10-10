@@ -1,12 +1,17 @@
-# Required check for pull requests into hanno. A sync/<tag> pull request
-# merges an upstream tag that the sync could not merge by itself, and may
-# auto-merge once this passes, so it gets the same checks the sync applies.
-# It runs on pull_request (never pull_request_target), with a read-only token
-# and no environment, so nothing in it can reach the fork's secrets.
+# Required gate for pull requests into hanno. Only a sync/<tag> branch of this
+# repository that passes the checks the sync itself applies may merge, so a
+# sync conflict an agent resolved can land through auto-merge.
+#
+# It runs on pull_request_target so the definition comes from hanno, never from
+# the pull request, which could otherwise rewrite the gate it must pass. It
+# never executes code from the pull request: the head is fetched as git data
+# and only inspected with git. It has a read-only token, uses no secret and no
+# environment. Tests that run the pull request's code live in
+# hanno-pull-request-tests.yml.
 name: Hanno pull request check
 
 on:
-  pull_request:
+  pull_request_target:
     branches:
       - hanno
 
@@ -28,7 +33,7 @@ jobs:
   verify:
     name: Verify pull request
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: Accept only branches of this repository
         run: |
@@ -37,61 +42,21 @@ jobs:
             exit 1
           fi
 
-      - name: Checkout
+      - name: Fetch hanno, the pull request head and the upstream tags as data
         env:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
-          git init .
+          git init --bare --quiet repository.git
+          cd repository.git
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git remote add upstream "${GITHUB_SERVER_URL}/${UPSTREAM_REPOSITORY}.git"
-          git fetch --no-tags origin "$HEAD_SHA" "+refs/heads/$FORK_BRANCH:refs/remotes/origin/$FORK_BRANCH"
-          git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git -c checkout.workers=0 checkout --detach "$HEAD_SHA"
+          git fetch --quiet --no-tags origin "$HEAD_SHA" "+refs/heads/$FORK_BRANCH:refs/remotes/origin/$FORK_BRANCH"
+          git fetch --quiet --no-tags upstream '+refs/tags/v*:refs/tags/v*'
 
-      # The pull request may change the script, so the copy from hanno decides.
-      - name: Verify a sync branch like the sync does
-        if: startsWith(github.event.pull_request.head.ref, 'sync/')
+      - name: Verify like the sync does
+        working-directory: repository.git
         run: |
           set -euo pipefail
-          tag="${HEAD_BRANCH#sync/}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Branch $HEAD_BRANCH must be named sync/<stable upstream tag>, for example sync/v0.0.46."
-            exit 1
-          fi
-          git fetch --no-tags upstream "+refs/tags/$tag:refs/tags/$tag"
           git show "origin/$FORK_BRANCH:.github/scripts/hanno-sync.sh" > "$RUNNER_TEMP/hanno-sync.sh"
-          bash "$RUNNER_TEMP/hanno-sync.sh" check-sync-branch "origin/$FORK_BRANCH" "$HEAD_SHA" "$tag"
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
-        with:
-          node-version-file: package.json
-          cache: true
-          run-install: false
-
-      - name: Install dependencies
-        run: |
-          vp install --filter=@t3tools/web... --filter=@t3tools/desktop...
-          vp run --filter @t3tools/desktop ensure:electron
-
-      - name: Test carried upstream pull requests
-        run: |
-          set -euo pipefail
-          mapfile -t test_files < <(
-            git log --format=%H --grep='^Carried-Pull-Request: ' HEAD |
-              xargs -r -n 1 git show --name-only --format= |
-              grep -E '^apps/web/.*\.test\.tsx?$' | sort -u |
-              while read -r file; do [[ -f "$file" ]] && echo "${file#apps/web/}"; done
-          )
-          if (( ${#test_files[@]} == 0 )); then
-            echo "No carried pull request has web tests."
-            exit 0
-          fi
-          cd apps/web && vp test run --project unit "${test_files[@]}"
-
-      - name: Typecheck web
-        run: vp run --filter @t3tools/web typecheck
-
-      - name: Typecheck desktop
-        run: vp run --filter @t3tools/desktop typecheck
+          bash "$RUNNER_TEMP/hanno-sync.sh" check-pull-request "origin/$FORK_BRANCH" "$HEAD_SHA" "$HEAD_BRANCH"

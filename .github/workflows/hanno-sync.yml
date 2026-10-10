@@ -1,0 +1,153 @@
+# Keeps the hanno branch on the newest stable upstream release and publishes a
+# new fork release whenever the branch changes. A rebase conflict opens one
+# issue and publishes nothing.
+name: Hanno upstream sync
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  push:
+    branches:
+      - hanno
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+
+concurrency:
+  group: hanno-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: pingdotgg/t3code
+  FORK_BRANCH: hanno
+  CONFLICT_ISSUE_TITLE: Upstream sync is blocked by a rebase conflict
+
+jobs:
+  sync:
+    name: Rebase onto upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: sync
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # The fork's commits delete upstream's workflows, but copies stay
+      # registered from other branches such as main.
+      - name: Disable every workflow but the fork's own
+        run: |
+          set -euo pipefail
+          gh workflow list -R "$GITHUB_REPOSITORY" --all --json id,path,state \
+            --jq '.[] | select(.state == "active")
+              | select(.path != ".github/workflows/hanno-release.yml" and .path != ".github/workflows/hanno-sync.yml")
+              | .id' |
+            while read -r workflow_id; do
+              gh workflow disable "$workflow_id" -R "$GITHUB_REPOSITORY"
+            done
+
+      - name: Checkout
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git config user.name "hanno-sync[bot]"
+          git config user.email "hanno-sync@users.noreply.github.com"
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags origin "$GITHUB_SHA" "+refs/heads/$FORK_BRANCH:refs/remotes/origin/$FORK_BRANCH" "+refs/tags/*:refs/tags/*"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout -B "$FORK_BRANCH" "origin/$FORK_BRANCH"
+          echo "BRANCH_BEFORE_SYNC=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      # The rebase rewrites the working tree with upstream content, so the steps
+      # run a copy of the script taken from this workflow's own commit.
+      - name: Copy the sync script
+        run: |
+          git show "$GITHUB_SHA:.github/scripts/hanno-sync.sh" > "$RUNNER_TEMP/hanno-sync.sh"
+          chmod +x "$RUNNER_TEMP/hanno-sync.sh"
+          echo "SYNC_SCRIPT=$RUNNER_TEMP/hanno-sync.sh" >> "$GITHUB_ENV"
+
+      - name: Restore rerere cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .git/rr-cache
+          key: rerere-${{ github.run_id }}
+          restore-keys: rerere-
+
+      - name: Rebase onto the newest stable upstream tag
+        id: rebase
+        run: |
+          "$SYNC_SCRIPT" rebase
+          if ! grep -q '^conflict=true' "$GITHUB_OUTPUT"; then
+            "$SYNC_SCRIPT" check-fork-paths "$BRANCH_BEFORE_SYNC"
+          fi
+
+      - name: Push branch
+        if: steps.rebase.outputs.conflict != 'true'
+        env:
+          DEPLOY_KEY: ${{ secrets.HANNO_SYNC_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/deploy_key"
+          trap 'rm -f "$key"' EXIT
+          install -m 600 /dev/null "$key"
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          ssh-keyscan github.com > "$RUNNER_TEMP/known_hosts" 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts" \
+            git push --force-with-lease="$FORK_BRANCH:$BRANCH_BEFORE_SYNC" \
+            "git@github.com:${GITHUB_REPOSITORY}.git" "$FORK_BRANCH"
+
+      - name: Decide release
+        id: release
+        if: steps.rebase.outputs.conflict != 'true'
+        run: '"$SYNC_SCRIPT" decide-release "$UPSTREAM_TAG"'
+        env:
+          UPSTREAM_TAG: ${{ steps.rebase.outputs.upstream_tag }}
+
+      - name: Report sync problems
+        if: always() && steps.rebase.outcome == 'success'
+        env:
+          UPSTREAM_TAG: ${{ steps.rebase.outputs.upstream_tag }}
+          CONFLICT: ${{ steps.rebase.outputs.conflict }}
+        run: |
+          set -euo pipefail
+          existing_issue="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "in:title \"$CONFLICT_ISSUE_TITLE\"" --json number --jq '.[0].number // empty')"
+          body="$RUNNER_TEMP/issue.md"
+          if [[ "$CONFLICT" == "true" ]]; then
+            {
+              echo "Rebasing \`$FORK_BRANCH\` onto \`$UPSTREAM_TAG\` stopped on a conflict. Nothing was published."
+              echo
+              echo "Conflicting files, or workflow files the rebase would add or change:"
+              sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/conflicts.txt"
+              echo
+              echo "Rebase \`$FORK_BRANCH\` onto \`$UPSTREAM_TAG\` by hand and push it. The push starts a new sync, which publishes the release."
+              echo
+              echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            } > "$body"
+          else
+            if [[ -n "$existing_issue" ]]; then
+              gh issue close "$existing_issue" -R "$GITHUB_REPOSITORY" --comment "Sync onto $UPSTREAM_TAG succeeded."
+            fi
+            exit 0
+          fi
+          if [[ -n "$existing_issue" ]]; then
+            gh issue edit "$existing_issue" -R "$GITHUB_REPOSITORY" --body-file "$body"
+            gh issue comment "$existing_issue" -R "$GITHUB_REPOSITORY" --body "Still blocked on $UPSTREAM_TAG. The description above is current."
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$CONFLICT_ISSUE_TITLE" --body-file "$body"
+          fi
+
+  release:
+    name: Release
+    needs: sync
+    if: needs.sync.outputs.version != ''
+    uses: ./.github/workflows/hanno-release.yml
+    with:
+      version: ${{ needs.sync.outputs.version }}
+      ref: ${{ needs.sync.outputs.sha }}

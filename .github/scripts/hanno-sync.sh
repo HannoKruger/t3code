@@ -26,21 +26,25 @@ newest_stable_tag() {
     sort -V | tail -n 1
 }
 
-is_pull_request_merged() {
-  [[ "$(gh pr view "$1" -R "$UPSTREAM_REPOSITORY" --json state --jq .state)" == "MERGED" ]]
+# A pull request merged into main after the tag was cut is not in the tag, so
+# dropping its carried copy then would ship the tag without the feature.
+is_pull_request_in_tag() {
+  local pull_request="$1" tag="$2" merge_commit
+  merge_commit="$(gh pr view "$pull_request" -R "$UPSTREAM_REPOSITORY" --json mergeCommit --jq '.mergeCommit.oid // empty')"
+  [[ -n "$merge_commit" ]] && git merge-base --is-ancestor "$merge_commit" "$tag" 2>/dev/null
 }
 
 carried_pull_request_of() {
   git log -1 --format='%(trailers:key=Carried-Pull-Request,valueonly)' "$1" | head -n 1
 }
 
-# Once upstream merges a carried pull request, its reviewed version can differ
-# from the carried copy, so the copy is dropped instead of rebased.
-merged_carried_commits() {
-  local base="$1" commit pull_request
+# Once a tag contains a carried pull request, upstream's reviewed version can
+# differ from the carried copy, so the copy is dropped instead of rebased.
+carried_commits_in_tag() {
+  local base="$1" tag="$2" commit pull_request
   for commit in $(git rev-list "$base..$FORK_BRANCH"); do
     pull_request="$(carried_pull_request_of "$commit")"
-    if [[ -n "$pull_request" ]] && is_pull_request_merged "$pull_request"; then
+    if [[ -n "$pull_request" ]] && is_pull_request_in_tag "$pull_request" "$tag"; then
       echo "$commit"
     fi
   done
@@ -107,7 +111,7 @@ rebase() {
   fi
 
   local -a dropped
-  mapfile -t dropped < <(merged_carried_commits "$base")
+  mapfile -t dropped < <(carried_commits_in_tag "$base" "$newest_tag")
   if GIT_SEQUENCE_EDITOR="$(sequence_editor_dropping "${dropped[@]}")" \
     git rebase --interactive --empty=drop --onto "$newest_tag" "$base" "$FORK_BRANCH" ||
     continue_rebase_while_resolved; then

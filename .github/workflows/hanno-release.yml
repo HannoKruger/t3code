@@ -1,0 +1,149 @@
+# Builds the macOS arm64 desktop app of this fork, signed with the fork's
+# self-signed certificate, and publishes it as the newest GitHub release so the
+# app's built-in updater finds it.
+name: Hanno release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "App version, for example 0.0.46-hanno.1"
+        required: true
+        type: string
+      ref:
+        description: "Commit or branch to build (default: the branch this runs on)"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      ref:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hanno-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish macOS arm64
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # The signing certificate lives in this environment, which only the hanno
+    # branch may deploy to.
+    environment: release
+    env:
+      VERSION: ${{ inputs.version }}
+      BUILD_REF: ${{ inputs.ref || github.sha }}
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+      T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY: Hanno Kruger T3 Code
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+    steps:
+      - name: Check version
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-hanno\.[0-9]+$ ]]; then
+            echo "::error::Version '$VERSION' must look like 0.0.46-hanno.1." >&2
+            exit 1
+          fi
+          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release v$VERSION already exists." >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
+      # .repos tree, so this checks out by hand and leaves .repos out.
+      - name: Checkout
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$BUILD_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+          echo "BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      - name: Import signing certificate
+        env:
+          MAC_SELF_SIGNED_CERTIFICATE: ${{ secrets.MAC_SELF_SIGNED_CERTIFICATE }}
+          MAC_SELF_SIGNED_CERTIFICATE_PASSWORD: ${{ secrets.MAC_SELF_SIGNED_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/hanno-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          echo "::add-mask::$keychain_password"
+          certificate_bundle="$RUNNER_TEMP/hanno-signing.p12"
+          certificate="$RUNNER_TEMP/hanno-signing.pem"
+          printf '%s' "$MAC_SELF_SIGNED_CERTIFICATE" | base64 --decode > "$certificate_bundle"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate_bundle" -k "$keychain" -P "$MAC_SELF_SIGNED_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-certificate -c "$T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY" -p "$keychain" > "$certificate"
+          # electron-builder only signs with identities that find-identity -v
+          # lists, and a self-signed certificate is listed only once trusted.
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$certificate"
+          rm -f "$certificate_bundle" "$certificate"
+          security find-identity -v -p codesigning "$keychain" | tee "$RUNNER_TEMP/identities.txt"
+          grep -q "\"$T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY\"" "$RUNNER_TEMP/identities.txt"
+
+      - name: Build desktop artifact
+        run: vp run dist:desktop:artifact --platform mac --target dmg --arch arm64 --build-version "$VERSION" --verbose
+
+      - name: Verify signature
+        run: |
+          set -euo pipefail
+          ditto -x -k release/*.zip "$RUNNER_TEMP/shipped"
+          app="$(find "$RUNNER_TEMP/shipped" -maxdepth 1 -name '*.app' -type d | head -n 1)"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | tee "$RUNNER_TEMP/codesign.txt"
+          grep -q "^Authority=$T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY$" "$RUNNER_TEMP/codesign.txt"
+          codesign -d -r- "$app"
+          grep -q "^version: $VERSION$" release/latest-mac.yml
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(release/*.dmg release/*.zip release/*.blockmap release/latest-mac.yml)
+          gh release create "v$VERSION" "${assets[@]}" \
+            -R "$GITHUB_REPOSITORY" \
+            --target "$BUILD_SHA" \
+            --title "T3 Code $VERSION" \
+            --notes "macOS arm64 build of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
+            --latest

@@ -1,5 +1,6 @@
 import type { EnvironmentId, ServerConfig, ServerSelfUpdateCapability } from "@t3tools/contracts";
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
+import { upstreamReleaseVersion } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
 
@@ -78,7 +79,7 @@ export function resolveVersionMismatch(
   }
 
   return {
-    clientVersion: normalizedClientVersion,
+    clientVersion: upstreamReleaseVersion(normalizedClientVersion),
     serverVersion: normalizedServerVersion,
     hint: "Version mismatch. Try syncing the client and server to the same T3 Code version.",
   };

@@ -65,6 +65,15 @@ export function cliReleaseDownloadBaseUrl(
 }
 
 /**
+ * The upstream release a fork build is based on. Fork builds are versioned
+ * `<upstream>-hanno.<n>`, but CLI archives and npm packages exist only for the
+ * upstream version.
+ */
+export function upstreamReleaseVersion(version: string): string {
+  return version.replace(/-hanno\.\d+$/u, "");
+}
+
+/**
  * Parses the `sha256sum` style checksum file attached to each release.
  * Lines are `<hex>  <file>`; a leading `*` marks binary mode and is ignored.
  */

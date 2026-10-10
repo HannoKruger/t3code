@@ -16,6 +16,7 @@ import * as Option from "effect/Option";
 import * as Electron from "electron";
 
 import * as NetService from "@t3tools/shared/Net";
+import { upstreamReleaseVersion } from "@t3tools/shared/cliRelease";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import type { RemoteT3RunnerOptions } from "@t3tools/ssh/tunnel";
 import serverPackageJson from "../../server/package.json" with { type: "json" };
@@ -98,7 +99,7 @@ const resolveDesktopSshCliRunner = (
       nodeEngineRange: serverPackageJson.engines.node,
     };
   }
-  return { archiveVersion: environment.appVersion };
+  return { archiveVersion: upstreamReleaseVersion(environment.appVersion) };
 };
 
 const desktopSshEnvironmentLayer = Layer.unwrap(

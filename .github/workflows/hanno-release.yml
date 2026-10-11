@@ -1,6 +1,6 @@
 # Builds the macOS arm64 desktop app of this fork, signed with the fork's
-# self-signed certificate, and publishes it as the newest GitHub release so the
-# app's built-in updater finds it.
+# self-signed certificate, and the Windows x64 installer, unsigned. Publishes
+# both as the newest GitHub release so the app's built-in updater finds them.
 name: Hanno release
 
 on:
@@ -31,22 +31,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build and publish macOS arm64
-    runs-on: macos-latest
-    timeout-minutes: 60
-    # The signing certificate lives in this environment, which only the hanno
-    # branch may deploy to.
-    environment: release
+  check:
+    name: Check version
+    runs-on: ubuntu-latest
     env:
+      GH_TOKEN: ${{ github.token }}
       VERSION: ${{ inputs.version }}
       BUILD_REF: ${{ inputs.ref || github.sha }}
-      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
-      T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY: Hanno Kruger T3 Code
-      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
-      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
-      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
-      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - name: Check version
         run: |
@@ -58,9 +51,31 @@ jobs:
             echo "::error::Release v$VERSION already exists." >&2
             exit 1
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
 
+      # Both builds and the release tag use this one commit, even when a branch
+      # name was given and the branch moves during the run.
+      - name: Resolve commit
+        id: resolve
+        run: echo "sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$BUILD_REF" --jq .sha)" >> "$GITHUB_OUTPUT"
+
+  mac:
+    name: Build macOS arm64
+    needs: check
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # The signing certificate lives in this environment, which only the hanno
+    # branch may deploy to.
+    environment: release
+    env:
+      VERSION: ${{ inputs.version }}
+      BUILD_REF: ${{ needs.check.outputs.sha }}
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+      T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY: Hanno Kruger T3 Code
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+    steps:
       # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
       # .repos tree, so this checks out by hand and leaves .repos out.
       - name: Checkout
@@ -73,7 +88,6 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BUILD_REF"
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git -c checkout.workers=0 checkout --detach FETCH_HEAD
-          echo "BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -134,16 +148,127 @@ jobs:
           codesign -d -r- "$app"
           grep -q "^version: $VERSION$" release/latest-mac.yml
 
-      - name: Publish release
+      - name: Upload build
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-mac
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
+          retention-days: 1
+
+  windows:
+    name: Build Windows x64
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ inputs.version }}
+      BUILD_REF: ${{ needs.check.outputs.sha }}
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+    steps:
+      # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
+      # .repos tree, so this checks out by hand and leaves .repos out.
+      - name: Checkout
         env:
-          GH_TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          assets=(release/*.dmg release/*.zip release/*.blockmap release/latest-mac.yml)
-          gh release create "v$VERSION" "${assets[@]}" \
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$BUILD_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      # The resource monitor links against the Spectre-mitigated MSVC runtime,
+      # which the runner image does not install.
+      - name: Install Spectre-mitigated MSVC libs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      # Unsigned, because the fork has no Windows code-signing certificate.
+      # Without a WSL runtime archive the app runs agents natively on Windows only.
+      - name: Build desktop artifact
+        run: vp run dist:desktop:artifact --platform win --target nsis --arch x64 --build-version "$VERSION" --verbose
+
+      - name: Verify update manifest
+        run: |
+          grep -q "^version: $VERSION$" release/latest.yml
+
+      - name: Upload build
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish release
+    needs: [check, mac, windows]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+      BUILD_SHA: ${{ needs.check.outputs.sha }}
+    steps:
+      - name: Download builds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" release/* \
             -R "$GITHUB_REPOSITORY" \
             --target "$BUILD_SHA" \
             --title "T3 Code $VERSION" \
-            --notes "macOS arm64 build of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
+            --notes "macOS arm64 and Windows x64 builds of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
             --latest

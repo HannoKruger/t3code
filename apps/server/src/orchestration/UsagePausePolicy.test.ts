@@ -4,7 +4,7 @@ import * as DateTime from "effect/DateTime";
 
 import {
   findUsagePauseLimit,
-  isNearUsagePauseLimit,
+  nextUsagePauseDeadline,
   planUsagePauseAction,
   type UsagePauseLimit,
   type UsagePauseRecord,
@@ -100,11 +100,33 @@ describe("findUsagePauseLimit", () => {
   });
 });
 
-describe("isNearUsagePauseLimit", () => {
-  it("is near within ten points of a threshold", () => {
-    expect(isNearUsagePauseLimit([sessionWindow(80)], THRESHOLDS, NOW_MS)).toBe(true);
-    expect(isNearUsagePauseLimit([sessionWindow(79)], THRESHOLDS, NOW_MS)).toBe(false);
-    expect(isNearUsagePauseLimit([weeklyWindow(88)], THRESHOLDS, NOW_MS)).toBe(true);
+describe("nextUsagePauseDeadline", () => {
+  it("wakes at the end of the grace period for a paused thread that is still running", () => {
+    const pause = makePause({ createdAt: at(-minutes(1)) });
+    expect(
+      nextUsagePauseDeadline(
+        makeThread({ latestPause: pause, latestUserMessageAt: pause.createdAt }),
+      ),
+    ).toBe(NOW_MS + minutes(2));
+  });
+
+  it("wakes at the resume time for a paused thread that has stopped", () => {
+    const pause = makePause();
+    expect(
+      nextUsagePauseDeadline(
+        makeThread({ running: false, latestPause: pause, latestUserMessageAt: pause.createdAt }),
+      ),
+    ).toBe(Date.parse(pause.resumeAt));
+  });
+
+  it("has nothing to wake for when no pause is open", () => {
+    expect(nextUsagePauseDeadline(makeThread())).toBeNull();
+    const takenOver = makePause({ createdAt: at(-minutes(10)) });
+    expect(
+      nextUsagePauseDeadline(
+        makeThread({ latestPause: takenOver, latestUserMessageAt: at(-minutes(5)) }),
+      ),
+    ).toBeNull();
   });
 });
 

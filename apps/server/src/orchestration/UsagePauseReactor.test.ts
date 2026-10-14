@@ -15,6 +15,7 @@ import {
 } from "@t3tools/contracts";
 import { USAGE_PAUSE_ACTIVITY_KIND } from "@t3tools/shared/usagePause";
 import { assert, describe, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -123,6 +124,8 @@ const runSweep = (input: {
   readonly activities?: ReadonlyArray<OrchestrationThreadActivity>;
   readonly settings?: ServerSettings;
   readonly now?: string;
+  /** Time that passes after the sweeps, with no other event, before commands are read. */
+  readonly thenWait?: Duration.Input;
 }) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(Date.parse(input.now ?? NOW));
@@ -161,6 +164,10 @@ const runSweep = (input: {
     for (const threads of input.laterSweeps ?? []) {
       yield* Ref.set(visibleThreads, threads);
       yield* reactor.sweep;
+    }
+    if (input.thenWait !== undefined) {
+      yield* TestClock.adjust(input.thenWait);
+      yield* reactor.drain;
     }
     return yield* Ref.get(commands);
   }).pipe(Effect.scoped);
@@ -259,6 +266,22 @@ describe("UsagePauseReactor", () => {
         threads: [makeThread({ latestUserMessageAt: "2026-10-14T09:50:00.000Z" })],
         providers: [makeProvider(CLAUDE_INSTANCE, "claudeAgent", [sessionWindow(95)])],
         activities: [pauseActivity("2026-10-14T09:50:00.000Z", "2026-10-14T12:02:00.000Z")],
+      });
+      assert.deepStrictEqual(
+        commands.map((command) => command.type),
+        ["thread.turn.interrupt"],
+      );
+    }),
+  );
+
+  it.effect("stops a paused thread when its grace period ends, without another event", () =>
+    Effect.gen(function* () {
+      const commands = yield* runSweep({
+        now: "2026-10-14T09:51:00.000Z",
+        threads: [makeThread({ latestUserMessageAt: "2026-10-14T09:50:00.000Z" })],
+        providers: [makeProvider(CLAUDE_INSTANCE, "claudeAgent", [sessionWindow(95)])],
+        activities: [pauseActivity("2026-10-14T09:50:00.000Z", "2026-10-14T12:02:00.000Z")],
+        thenWait: "2 minutes",
       });
       assert.deepStrictEqual(
         commands.map((command) => command.type),

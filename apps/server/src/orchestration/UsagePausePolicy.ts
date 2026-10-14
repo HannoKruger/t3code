@@ -5,8 +5,6 @@ import * as DateTime from "effect/DateTime";
 export const USAGE_PAUSE_GRACE_MS = 3 * 60 * 1_000;
 /** Resume a little after the reset so the provider has reported the fresh window. */
 export const USAGE_PAUSE_RESUME_DELAY_MS = 2 * 60 * 1_000;
-/** Within this many points of a threshold, usage is refreshed every sweep instead of every few minutes. */
-const NEAR_LIMIT_MARGIN_PERCENT = 10;
 
 export interface UsagePauseThresholds {
   readonly sessionPercent: number;
@@ -100,21 +98,6 @@ export function findUsagePauseLimit(
   return latest;
 }
 
-export function isNearUsagePauseLimit(
-  windows: ReadonlyArray<ServerProviderUsageWindow>,
-  thresholds: UsagePauseThresholds,
-  nowMs: number,
-): boolean {
-  return windows.some((window) => {
-    const threshold = thresholdFor(window.id, thresholds);
-    return (
-      threshold !== null &&
-      isCurrent(window, nowMs) &&
-      window.usedPercent >= threshold - NEAR_LIMIT_MARGIN_PERCENT
-    );
-  });
-}
-
 function resumeAtFor(limit: UsagePauseLimit): string {
   return DateTime.formatIso(
     DateTime.makeUnsafe(Date.parse(limit.resetsAt) + USAGE_PAUSE_RESUME_DELAY_MS),
@@ -127,6 +110,19 @@ function isOpen(thread: UsagePauseThread, pause: UsagePauseRecord): boolean {
     thread.latestUserMessageAt === null ||
     Date.parse(thread.latestUserMessageAt) <= Date.parse(pause.createdAt)
   );
+}
+
+/**
+ * When this thread's decision next changes with time alone: the end of the grace period while a
+ * paused thread still runs, or its resume time once it has stopped. Everything else changes only
+ * through an event, such as a usage update or a message.
+ */
+export function nextUsagePauseDeadline(thread: UsagePauseThread): number | null {
+  const pause = thread.latestPause;
+  if (pause === null || !isOpen(thread, pause)) return null;
+  return thread.running
+    ? Date.parse(pause.createdAt) + USAGE_PAUSE_GRACE_MS
+    : Date.parse(pause.resumeAt);
 }
 
 export function usagePauseLimitKey(limit: Pick<UsagePauseLimit, "windowId" | "resetsAt">): string {

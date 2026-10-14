@@ -131,6 +131,30 @@ function makeWindow(
  * event before any probe has named the bucket is dropped: guessing a name
  * would draw a row the next probe cannot reconcile.
  */
+/**
+ * Each streamed event names one window, but the CLI also attaches every account window it knows
+ * as `unifiedWindows`. Reading all of them keeps the session and weekly rows current on every turn,
+ * not only when a probe runs.
+ */
+function unifiedAccountWindows(info: SDKRateLimitInfo): ReadonlyArray<ServerProviderUsageWindow> {
+  const unified = (info as { readonly unifiedWindows?: unknown }).unifiedWindows;
+  if (unified === null || typeof unified !== "object") return [];
+  return Object.entries(unified).flatMap(([id, window]) => {
+    const { utilization, resetsAt } = (window ?? {}) as {
+      readonly utilization?: unknown;
+      readonly resetsAt?: unknown;
+    };
+    if (!(id in WINDOWS) || typeof utilization !== "number") return [];
+    return [
+      makeWindow(
+        id,
+        utilization * 100,
+        isoFromEpochSeconds(typeof resetsAt === "number" ? resetsAt : undefined),
+      ),
+    ];
+  });
+}
+
 export function claudeRateLimitEventToUpdate(
   info: SDKRateLimitInfo,
   names: ClaudeScopedLimitNames,
@@ -141,6 +165,10 @@ export function claudeRateLimitEventToUpdate(
   }
   const usedPercent = info.utilization * 100;
   const resetsAt = isoFromEpochSeconds(info.resetsAt);
+  const accountWindows = unifiedAccountWindows(info);
+  if (accountWindows.length > 0) {
+    return { windows: accountWindows };
+  }
   if (type in WINDOWS) {
     return { windows: [makeWindow(type, usedPercent, resetsAt)] };
   }

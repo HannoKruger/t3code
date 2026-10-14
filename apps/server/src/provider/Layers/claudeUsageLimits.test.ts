@@ -145,6 +145,39 @@ describe("claudeRateLimitEventToUpdate", () => {
     });
   });
 
+  it("updates every account window the event reports, not only the one it is about", () => {
+    const event = {
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      utilization: 0.79,
+      resetsAt: 1_792_105_200,
+      unifiedWindows: {
+        five_hour: { utilization: 0.26, resetsAt: 1_792_033_800 },
+        seven_day: { utilization: 0.79, resetsAt: 1_792_105_200 },
+      },
+    } as const;
+    expect(claudeRateLimitEventToUpdate(event, noNames)).toEqual({
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session",
+          label: "Session",
+          usedPercent: 26,
+          windowDurationMins: 300,
+          resetsAt: "2026-10-15T03:10:00.000Z",
+        },
+        {
+          id: "seven_day",
+          kind: "weekly",
+          label: "Weekly",
+          usedPercent: 79,
+          windowDurationMins: 10080,
+          resetsAt: "2026-10-15T23:00:00.000Z",
+        },
+      ],
+    });
+  });
+
   it("lands the streamed overage-included bucket on the row the probe named", () => {
     const event = {
       status: "allowed",

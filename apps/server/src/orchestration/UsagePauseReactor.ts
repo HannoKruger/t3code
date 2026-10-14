@@ -4,10 +4,10 @@ import {
   MessageId,
   ProviderDriverKind,
   ThreadId,
+  type OrchestrationEvent,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   type ProviderInstanceId,
-  type ServerProvider,
 } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import {
@@ -21,9 +21,10 @@ import {
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FiberHandle from "effect/FiberHandle";
 import * as Layer from "effect/Layer";
-import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -34,13 +35,12 @@ import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./Services/ProjectionSnapshotQuery.ts";
 import {
   findUsagePauseLimit,
-  isNearUsagePauseLimit,
+  nextUsagePauseDeadline,
   planUsagePauseAction,
   usagePauseLimitKey,
   type UsagePauseAction,
-  type UsagePauseLimit,
   type UsagePauseRecord,
-  type UsagePauseThresholds,
+  type UsagePauseThread,
 } from "./UsagePausePolicy.ts";
 
 /**
@@ -59,8 +59,6 @@ export class UsagePauseReactor extends Context.Service<
 >()("t3/orchestration/UsagePauseReactor") {}
 
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
-/** Usage probes spawn the provider CLI, so near a limit they run at most this often. */
-const NEAR_LIMIT_REFRESH_MS = 60 * 1_000;
 
 const wrapUpMessage = (payload: UsagePausePayload) =>
   `[Usage pause] Claude ${usagePauseWindowName(payload)} usage is at ${Math.round(payload.usedPercent)}%. ` +
@@ -106,6 +104,19 @@ function latestPauseByThread(pauses: ReadonlyArray<RecordedPause>): Map<ThreadId
   return latest;
 }
 
+/** A thread starting or stopping, a message, or a recorded pause can change what the pause does. */
+function changesUsagePause(event: OrchestrationEvent): boolean {
+  switch (event.type) {
+    case "thread.session-set":
+    case "thread.message-sent":
+      return true;
+    case "thread.activity-appended":
+      return event.payload.activity.kind === USAGE_PAUSE_ACTIVITY_KIND;
+    default:
+      return false;
+  }
+}
+
 function providerInstanceOf(thread: OrchestrationThreadShell): ProviderInstanceId {
   return thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
 }
@@ -120,33 +131,8 @@ export const make = Effect.gen(function* () {
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const providerRegistry = yield* ProviderRegistry;
-  const lastRefreshByInstance = new Map<ProviderInstanceId, number>();
   // Limits this server has seen while enabled. The recorded pauses carry them across restarts.
   const enforcedLimitKeys = new Set<string>();
-
-  /** The regular probe runs every few minutes, which is too slow near a limit. */
-  const refreshNearLimit = Effect.fnUntraced(function* (
-    providers: ReadonlyArray<ServerProvider>,
-    runningInstances: ReadonlySet<ProviderInstanceId>,
-    thresholds: UsagePauseThresholds,
-    nowMs: number,
-  ) {
-    let refreshed = providers;
-    for (const provider of providers) {
-      const windows = provider.usageLimits?.windows ?? [];
-      const lastRefresh = lastRefreshByInstance.get(provider.instanceId) ?? 0;
-      if (
-        !runningInstances.has(provider.instanceId) ||
-        !isNearUsagePauseLimit(windows, thresholds, nowMs) ||
-        nowMs - lastRefresh < NEAR_LIMIT_REFRESH_MS
-      ) {
-        continue;
-      }
-      lastRefreshByInstance.set(provider.instanceId, nowMs);
-      refreshed = yield* providerRegistry.refreshInstance(provider.instanceId);
-    }
-    return refreshed.filter((provider) => provider.driver === CLAUDE_DRIVER && provider.enabled);
-  });
 
   const pauseThread = Effect.fnUntraced(function* (
     thread: OrchestrationThreadShell,
@@ -225,23 +211,10 @@ export const make = Effect.gen(function* () {
 
   const decideAndApply = (
     thread: OrchestrationThreadShell,
-    limit: UsagePauseLimit | null,
-    latestPause: RecordedPause | null,
-    enforcedLimits: ReadonlySet<string>,
+    candidate: UsagePauseThread,
     now: DateTime.Utc,
   ) => {
-    const action = planUsagePauseAction(
-      {
-        id: thread.id,
-        running: isRunning(thread),
-        activeTurnId: thread.session?.activeTurnId ?? null,
-        latestUserMessageAt: thread.latestUserMessageAt,
-        limit,
-        limitAlreadyEnforced: limit !== null && enforcedLimits.has(usagePauseLimitKey(limit)),
-        latestPause,
-      },
-      DateTime.toEpochMillis(now),
-    );
+    const action = planUsagePauseAction(candidate, DateTime.toEpochMillis(now));
     if (action === null) return Effect.void;
     return applyAction(thread, action, DateTime.formatIso(now)).pipe(
       Effect.catchCause((cause) =>
@@ -256,7 +229,19 @@ export const make = Effect.gen(function* () {
     );
   };
 
-  const sweep = Effect.gen(function* () {
+  /** Wakes the worker at the next grace or resume deadline; every other change arrives as an event. */
+  const setAlarm = (deadlines: ReadonlyArray<number>, nowMs: number) => {
+    const upcoming = deadlines.filter((deadline) => deadline > nowMs);
+    if (upcoming.length === 0) return FiberHandle.clear(alarm);
+    return FiberHandle.run(
+      alarm,
+      Effect.sleep(Duration.millis(Math.min(...upcoming) - nowMs)).pipe(
+        Effect.andThen(Effect.suspend(() => worker.enqueue(undefined))),
+      ),
+    );
+  };
+
+  const sweep: Effect.Effect<void> = Effect.gen(function* () {
     const settings = (yield* settingsService.getSettings).claudeUsagePause;
     if (!settings.enabled) return;
     const now = yield* DateTime.now;
@@ -269,11 +254,8 @@ export const make = Effect.gen(function* () {
     const threads = snapshot.threads.filter(
       (thread) => thread.archivedAt === null && (isRunning(thread) || pauses.has(thread.id)),
     );
-    const providers = yield* refreshNearLimit(
-      yield* providerRegistry.getProviders,
-      new Set(threads.filter(isRunning).map(providerInstanceOf)),
-      settings,
-      nowMs,
+    const providers = (yield* providerRegistry.getProviders).filter(
+      (provider) => provider.driver === CLAUDE_DRIVER && provider.enabled,
     );
     const limitByInstance = new Map(
       providers.map((provider) => [
@@ -285,21 +267,29 @@ export const make = Effect.gen(function* () {
       ...enforcedLimitKeys,
       ...recordedPauses.map(usagePauseLimitKey),
     ]);
+    const candidates = threads.flatMap((thread) => {
+      const instance = providerInstanceOf(thread);
+      if (!limitByInstance.has(instance)) return [];
+      const limit = limitByInstance.get(instance) ?? null;
+      const candidate: UsagePauseThread = {
+        id: thread.id,
+        running: isRunning(thread),
+        activeTurnId: thread.session?.activeTurnId ?? null,
+        latestUserMessageAt: thread.latestUserMessageAt,
+        limit,
+        limitAlreadyEnforced: limit !== null && enforcedLimits.has(usagePauseLimitKey(limit)),
+        latestPause: pauses.get(thread.id) ?? null,
+      };
+      return [{ thread, candidate }];
+    });
     yield* Effect.forEach(
-      threads,
-      (thread) => {
-        const instance = providerInstanceOf(thread);
-        return limitByInstance.has(instance)
-          ? decideAndApply(
-              thread,
-              limitByInstance.get(instance) ?? null,
-              pauses.get(thread.id) ?? null,
-              enforcedLimits,
-              now,
-            )
-          : Effect.void;
-      },
+      candidates,
+      ({ thread, candidate }) => decideAndApply(thread, candidate, now),
       { discard: true },
+    );
+    yield* setAlarm(
+      candidates.flatMap(({ candidate }) => nextUsagePauseDeadline(candidate) ?? []),
+      nowMs,
     );
     // Recorded even when nothing ran, so threads started from now on are left alone.
     for (const limit of limitByInstance.values()) {
@@ -314,19 +304,21 @@ export const make = Effect.gen(function* () {
     Effect.withSpan("UsagePauseReactor.sweep"),
   );
 
+  const alarm = yield* FiberHandle.make<void, never>();
   const worker = yield* makeDrainableWorker(() => sweep);
 
   const start: UsagePauseReactor["Service"]["start"] = Effect.fn("UsagePauseReactor.start")(
     function* () {
-      yield* forkParked(
-        Effect.gen(function* () {
-          yield* worker.enqueue(undefined);
-          yield* worker.drain;
-        }).pipe(Effect.repeat(Schedule.spaced("30 seconds")), Effect.asVoid),
-      );
-      // Usage arrives mid-turn as well as from probes; react to it rather than waiting for the timer.
+      const domainEvents = yield* engine.subscribeDomainEvents;
+      yield* forkParked(worker.enqueue(undefined));
+      // Usage arrives with every Claude request and from provider probes.
       yield* forkParked(
         Stream.runForEach(providerRegistry.streamChanges, () => worker.enqueue(undefined)),
+      );
+      yield* forkParked(
+        Stream.runForEach(domainEvents, (event) =>
+          changesUsagePause(event) ? worker.enqueue(undefined) : Effect.void,
+        ),
       );
     },
   );

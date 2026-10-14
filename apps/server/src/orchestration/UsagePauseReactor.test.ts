@@ -117,6 +117,8 @@ const pauseActivity = (createdAt: string, resumeAt: string): OrchestrationThread
 
 const runSweep = (input: {
   readonly threads: ReadonlyArray<OrchestrationThreadShell>;
+  /** Threads seen by later sweeps of the same reactor, one entry per sweep. */
+  readonly laterSweeps?: ReadonlyArray<ReadonlyArray<OrchestrationThreadShell>>;
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly activities?: ReadonlyArray<OrchestrationThreadActivity>;
   readonly settings?: ServerSettings;
@@ -125,15 +127,18 @@ const runSweep = (input: {
   Effect.gen(function* () {
     yield* TestClock.setTime(Date.parse(input.now ?? NOW));
     const commands = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+    const visibleThreads = yield* Ref.make(input.threads);
     const dependencies = Layer.mergeAll(
       Layer.mock(ProjectionSnapshotQuery)({
         getShellSnapshot: () =>
-          Effect.succeed({
-            snapshotSequence: 1,
-            projects: [],
-            threads: input.threads,
-            updatedAt: NOW,
-          }),
+          Ref.get(visibleThreads).pipe(
+            Effect.map((threads) => ({
+              snapshotSequence: 1,
+              projects: [],
+              threads,
+              updatedAt: NOW,
+            })),
+          ),
         listActivitiesByKind: () => Effect.succeed(input.activities ?? []),
       }),
       Layer.mock(ProviderRegistry)({
@@ -153,6 +158,10 @@ const runSweep = (input: {
     );
     const reactor = yield* UsagePauseReactor.make.pipe(Effect.provide(dependencies));
     yield* reactor.sweep;
+    for (const threads of input.laterSweeps ?? []) {
+      yield* Ref.set(visibleThreads, threads);
+      yield* reactor.sweep;
+    }
     return yield* Ref.get(commands);
   }).pipe(Effect.scoped);
 
@@ -178,6 +187,40 @@ describe("UsagePauseReactor", () => {
         threadId: THREAD_ID,
         resumeAt: "2026-10-14T12:02:00.000Z",
       });
+    }),
+  );
+
+  it.effect("leaves a thread started after the limit was reached running", () =>
+    Effect.gen(function* () {
+      const commands = yield* runSweep({
+        threads: [makeThread({ running: false })],
+        laterSweeps: [[makeThread()]],
+        providers: [makeProvider(CLAUDE_INSTANCE, "claudeAgent", [sessionWindow(91)])],
+      });
+      assert.deepStrictEqual(commands, []);
+    }),
+  );
+
+  it.effect("remembers an enforced limit across restarts through the recorded pauses", () =>
+    Effect.gen(function* () {
+      const otherThreadPause = {
+        ...pauseActivity("2026-10-14T09:50:00.000Z", "2026-10-14T12:02:00.000Z"),
+        id: EventId.make("usage-pause:thread-2:2026-10-14T12:00:00.000Z"),
+        payload: {
+          threadId: "thread-2",
+          windowId: "five_hour",
+          label: "Session",
+          usedPercent: 91,
+          resetsAt: SESSION_RESET,
+          resumeAt: "2026-10-14T12:02:00.000Z",
+        },
+      };
+      const commands = yield* runSweep({
+        threads: [makeThread()],
+        providers: [makeProvider(CLAUDE_INSTANCE, "claudeAgent", [sessionWindow(91)])],
+        activities: [otherThreadPause],
+      });
+      assert.deepStrictEqual(commands, []);
     }),
   );
 

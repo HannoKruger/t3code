@@ -36,6 +36,8 @@ export interface UsagePauseThread {
   readonly latestUserMessageAt: string | null;
   /** The limit the thread's provider account is over right now, if any. */
   readonly limit: UsagePauseLimit | null;
+  /** The pause already acted on this limit, so a run now was started after the limit was reached. */
+  readonly limitAlreadyEnforced: boolean;
   readonly latestPause: UsagePauseRecord | null;
 }
 
@@ -127,6 +129,10 @@ function isOpen(thread: UsagePauseThread, pause: UsagePauseRecord): boolean {
   );
 }
 
+export function usagePauseLimitKey(limit: Pick<UsagePauseLimit, "windowId" | "resetsAt">): string {
+  return `${limit.windowId}:${limit.resetsAt}`;
+}
+
 export function planUsagePauseAction(
   thread: UsagePauseThread,
   nowMs: number,
@@ -150,8 +156,14 @@ export function planUsagePauseAction(
           steer: false,
         };
   }
-  // A thread the user kept running after its pause is theirs until the window resets.
-  if (!thread.running || thread.limit === null || pause?.resetsAt === thread.limit.resetsAt) {
+  // Only work running when the limit was reached is paused. A thread the user kept running
+  // after its pause, or started afterwards, is theirs until the window resets.
+  if (
+    !thread.running ||
+    thread.limit === null ||
+    thread.limitAlreadyEnforced ||
+    pause?.resetsAt === thread.limit.resetsAt
+  ) {
     return null;
   }
   return {

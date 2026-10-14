@@ -50,6 +50,7 @@ const makeThread = (overrides: Partial<UsagePauseThread> = {}): UsagePauseThread
   activeTurnId: TurnId.make("turn-1"),
   latestUserMessageAt: at(-minutes(30)),
   limit: sessionLimit,
+  limitAlreadyEnforced: false,
   latestPause: null,
   ...overrides,
 });
@@ -116,6 +117,10 @@ describe("planUsagePauseAction", () => {
       resumeAt: "2026-10-14T12:02:00.000Z",
       steer: true,
     });
+  });
+
+  it("leaves a thread started after the limit was enforced running", () => {
+    expect(planUsagePauseAction(makeThread({ limitAlreadyEnforced: true }), NOW_MS)).toBeNull();
   });
 
   it("leaves idle threads alone, since they are not spending usage", () => {

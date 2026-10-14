@@ -36,7 +36,9 @@ import {
   findUsagePauseLimit,
   isNearUsagePauseLimit,
   planUsagePauseAction,
+  usagePauseLimitKey,
   type UsagePauseAction,
+  type UsagePauseLimit,
   type UsagePauseRecord,
   type UsagePauseThresholds,
 } from "./UsagePausePolicy.ts";
@@ -70,6 +72,7 @@ const RESUME_MESSAGE =
 
 interface RecordedPause extends UsagePauseRecord {
   readonly threadId: ThreadId;
+  readonly windowId: string;
 }
 
 function readRecordedPause(activity: OrchestrationThreadActivity): RecordedPause | null {
@@ -79,19 +82,22 @@ function readRecordedPause(activity: OrchestrationThreadActivity): RecordedPause
   return {
     id: activity.id,
     threadId: ThreadId.make(threadId),
+    windowId: payload.windowId,
     createdAt: activity.createdAt,
     resetsAt: payload.resetsAt,
     resumeAt: payload.resumeAt,
   };
 }
 
-function latestPauseByThread(
+function readRecordedPauses(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
-): Map<ThreadId, RecordedPause> {
+): ReadonlyArray<RecordedPause> {
+  return activities.flatMap((activity) => readRecordedPause(activity) ?? []);
+}
+
+function latestPauseByThread(pauses: ReadonlyArray<RecordedPause>): Map<ThreadId, RecordedPause> {
   const latest = new Map<ThreadId, RecordedPause>();
-  for (const activity of activities) {
-    const pause = readRecordedPause(activity);
-    if (pause === null) continue;
+  for (const pause of pauses) {
     const current = latest.get(pause.threadId);
     if (current === undefined || Date.parse(pause.createdAt) > Date.parse(current.createdAt)) {
       latest.set(pause.threadId, pause);
@@ -115,6 +121,8 @@ export const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const providerRegistry = yield* ProviderRegistry;
   const lastRefreshByInstance = new Map<ProviderInstanceId, number>();
+  // Limits this server has seen while enabled. The recorded pauses carry them across restarts.
+  const enforcedLimitKeys = new Set<string>();
 
   /** The regular probe runs every few minutes, which is too slow near a limit. */
   const refreshNearLimit = Effect.fnUntraced(function* (
@@ -217,22 +225,22 @@ export const make = Effect.gen(function* () {
 
   const decideAndApply = (
     thread: OrchestrationThreadShell,
-    provider: ServerProvider,
+    limit: UsagePauseLimit | null,
     latestPause: RecordedPause | null,
-    thresholds: UsagePauseThresholds,
+    enforcedLimits: ReadonlySet<string>,
     now: DateTime.Utc,
   ) => {
-    const nowMs = DateTime.toEpochMillis(now);
     const action = planUsagePauseAction(
       {
         id: thread.id,
         running: isRunning(thread),
         activeTurnId: thread.session?.activeTurnId ?? null,
         latestUserMessageAt: thread.latestUserMessageAt,
-        limit: findUsagePauseLimit(provider.usageLimits?.windows ?? [], thresholds, nowMs),
+        limit,
+        limitAlreadyEnforced: limit !== null && enforcedLimits.has(usagePauseLimitKey(limit)),
         latestPause,
       },
-      nowMs,
+      DateTime.toEpochMillis(now),
     );
     if (action === null) return Effect.void;
     return applyAction(thread, action, DateTime.formatIso(now)).pipe(
@@ -252,33 +260,51 @@ export const make = Effect.gen(function* () {
     const settings = (yield* settingsService.getSettings).claudeUsagePause;
     if (!settings.enabled) return;
     const now = yield* DateTime.now;
+    const nowMs = DateTime.toEpochMillis(now);
     const snapshot = yield* snapshots.getShellSnapshot({ unsettledOnly: true });
-    const pauses = latestPauseByThread(
+    const recordedPauses = readRecordedPauses(
       yield* snapshots.listActivitiesByKind(USAGE_PAUSE_ACTIVITY_KIND),
     );
+    const pauses = latestPauseByThread(recordedPauses);
     const threads = snapshot.threads.filter(
       (thread) => thread.archivedAt === null && (isRunning(thread) || pauses.has(thread.id)),
     );
-    if (threads.length === 0) return;
     const providers = yield* refreshNearLimit(
       yield* providerRegistry.getProviders,
       new Set(threads.filter(isRunning).map(providerInstanceOf)),
       settings,
-      DateTime.toEpochMillis(now),
+      nowMs,
     );
-    const providerByInstance = new Map(
-      providers.map((provider) => [provider.instanceId, provider]),
+    const limitByInstance = new Map(
+      providers.map((provider) => [
+        provider.instanceId,
+        findUsagePauseLimit(provider.usageLimits?.windows ?? [], settings, nowMs),
+      ]),
     );
+    const enforcedLimits = new Set([
+      ...enforcedLimitKeys,
+      ...recordedPauses.map(usagePauseLimitKey),
+    ]);
     yield* Effect.forEach(
       threads,
       (thread) => {
-        const provider = providerByInstance.get(providerInstanceOf(thread));
-        return provider === undefined
-          ? Effect.void
-          : decideAndApply(thread, provider, pauses.get(thread.id) ?? null, settings, now);
+        const instance = providerInstanceOf(thread);
+        return limitByInstance.has(instance)
+          ? decideAndApply(
+              thread,
+              limitByInstance.get(instance) ?? null,
+              pauses.get(thread.id) ?? null,
+              enforcedLimits,
+              now,
+            )
+          : Effect.void;
       },
       { discard: true },
     );
+    // Recorded even when nothing ran, so threads started from now on are left alone.
+    for (const limit of limitByInstance.values()) {
+      if (limit !== null) enforcedLimitKeys.add(usagePauseLimitKey(limit));
+    }
   }).pipe(
     Effect.catchCause((cause) =>
       Cause.hasInterruptsOnly(cause)

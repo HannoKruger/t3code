@@ -15,6 +15,8 @@ copy of upstream. Upstream is fetch-only; pushing to it is disabled in the local
    Both land in one release, and only commits already on `hanno` are built. The GitHub environment `release` holds the
    certificate and accepts only branch `hanno`. The desktop apps check this repository's releases every 4 minutes
    and update themselves. Servers update from this repository's releases, never upstream's.
+   Pressing Update in the desktop app first updates every connected server on an older version, then installs the app,
+   so the app and its servers stay on one version. Nothing updates a server on its own.
 
 The signing certificate and its password are kept on hulk in `~/.config/t3code-fork` and as secrets of the `release`
 environment.

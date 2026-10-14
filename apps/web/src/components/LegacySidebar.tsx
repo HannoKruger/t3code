@@ -137,6 +137,7 @@ import {
   shouldShowArm64IntelBuildWarning,
   shouldToastDesktopUpdateActionResult,
 } from "./desktopUpdate.logic";
+import { installDesktopUpdate } from "./desktopUpdateServers";
 import { showDesktopUpdateDownloadedToast } from "./desktopUpdate.toast";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
@@ -3711,8 +3712,7 @@ export default function LegacySidebar() {
         setDesktopUpdateActionPending(false);
         return;
       }
-      void bridge
-        .installUpdate()
+      void installDesktopUpdate(bridge, desktopUpdateState)
         .then((result) => {
           if (!shouldToastDesktopUpdateActionResult(result)) return;
           const actionError = getDesktopUpdateActionError(result);

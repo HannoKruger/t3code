@@ -19,6 +19,7 @@ import {
   shouldShowArm64IntelBuildWarning,
   shouldToastDesktopUpdateActionResult,
 } from "../desktopUpdate.logic";
+import { installDesktopUpdate } from "../desktopUpdateServers";
 import { showDesktopUpdateDownloadedToast } from "../desktopUpdate.toast";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Popover, PopoverCreateHandle, PopoverPopup, PopoverTrigger } from "../ui/popover";
@@ -232,8 +233,7 @@ function SidebarUpdateControl() {
         setIsActionPending(false);
         return;
       }
-      void bridge
-        .installUpdate()
+      void installDesktopUpdate(bridge, state)
         .then((result) => {
           if (!shouldToastDesktopUpdateActionResult(result)) return;
           const actionError = getDesktopUpdateActionError(result);

@@ -1,6 +1,5 @@
 import type { EnvironmentId, ServerConfig, ServerSelfUpdateCapability } from "@t3tools/contracts";
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
-import { upstreamReleaseVersion } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
 
@@ -47,7 +46,8 @@ function versionCore(version: string): string {
  * The skew a user can act on: the connected server runs an older T3 Code than
  * this client, so the server is the side that needs updating.
  *
- * Two nightly builds compare their full versions, including the date and run.
+ * Two nightly builds compare their full versions, including the date and run,
+ * and so do two builds of this fork (`<version>-hanno.<n>`).
  * Other combinations compare their core `major.minor.patch` only, so a stable
  * build and a nightly build with the same core do not cause an update warning.
  * A server ahead of the client does not need an update. Versions that do not
@@ -64,14 +64,15 @@ export function resolveVersionMismatch(
 
   const clientCore = versionCore(normalizedClientVersion);
   const serverCore = versionCore(normalizedServerVersion);
-  const compareNightlyBuilds =
-    parseSemver(normalizedClientVersion)?.prerelease[0] === "nightly" &&
-    parseSemver(normalizedServerVersion)?.prerelease[0] === "nightly";
+  const clientTrain = parseSemver(normalizedClientVersion)?.prerelease[0];
+  const compareFullVersions =
+    (clientTrain === "nightly" || clientTrain === "hanno") &&
+    parseSemver(normalizedServerVersion)?.prerelease[0] === clientTrain;
   const serverIsBehind =
     parseSemver(clientCore) && parseSemver(serverCore)
       ? compareSemverVersions(
-          compareNightlyBuilds ? normalizedServerVersion : serverCore,
-          compareNightlyBuilds ? normalizedClientVersion : clientCore,
+          compareFullVersions ? normalizedServerVersion : serverCore,
+          compareFullVersions ? normalizedClientVersion : clientCore,
         ) < 0
       : normalizedServerVersion !== normalizedClientVersion;
   if (!serverIsBehind) {
@@ -79,7 +80,7 @@ export function resolveVersionMismatch(
   }
 
   return {
-    clientVersion: upstreamReleaseVersion(normalizedClientVersion),
+    clientVersion: normalizedClientVersion,
     serverVersion: normalizedServerVersion,
     hint: "Version mismatch. Try syncing the client and server to the same T3 Code version.",
   };

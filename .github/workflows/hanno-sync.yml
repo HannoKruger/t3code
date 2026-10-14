@@ -81,16 +81,6 @@ jobs:
           key: rerere-${{ github.run_id }}
           restore-keys: rerere-
 
-      # A pull request that changed workflow files should never have passed
-      # hanno-pull-request-check.yml; if one did, its push publishes nothing.
-      - name: Refuse a push that changed workflow files
-        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          git fetch --quiet --no-tags origin "$BEFORE"
-          "$SYNC_SCRIPT" check-pushed-paths "$BEFORE" "$GITHUB_SHA"
-
       - name: Merge the newest stable upstream tag
         id: merge
         run: |

@@ -1,6 +1,6 @@
 # Builds this fork's macOS arm64 desktop app, signed with the fork's
-# self-signed certificate, and its Linux x64 server archive, then publishes both
-# as the newest GitHub release. The desktop app's updater and `t3 update` on
+# self-signed certificate, its Windows x64 installer, unsigned, and its Linux x64
+# server archive, then publishes them as the newest GitHub release. The desktop app's updater and `t3 update` on
 # Linux servers both read this repository's releases.
 name: Hanno release
 
@@ -175,6 +175,92 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  windows:
+    name: Build Windows x64
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_SHA: ${{ needs.prepare.outputs.sha }}
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+    steps:
+      # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
+      # .repos tree, so this checks out by hand and leaves .repos out.
+      - name: Checkout
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$BUILD_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      # The resource monitor links against the Spectre-mitigated MSVC runtime,
+      # which the runner image does not install.
+      - name: Install Spectre-mitigated MSVC libs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      # Unsigned, because the fork has no Windows code-signing certificate.
+      # Without a WSL runtime archive the app runs agents natively on Windows only.
+      - name: Build desktop artifact
+        run: vp run dist:desktop:artifact --platform win --target nsis --arch x64 --build-version "$VERSION" --verbose
+
+      - name: Verify update manifest
+        run: |
+          grep -q "^version: $VERSION$" release/latest.yml
+
+      - name: Upload build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-windows-x64
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 1
+
   server-linux-x64:
     name: Build Linux x64 server
     needs: prepare
@@ -258,7 +344,7 @@ jobs:
   # its own platform's files.
   publish:
     name: Publish release
-    needs: [prepare, macos, server-linux-x64]
+    needs: [prepare, macos, windows, server-linux-x64]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -282,10 +368,10 @@ jobs:
             exit 1
           fi
           sha256sum "${archives[@]}" > SHA256SUMS
-          assets=(*.dmg *.zip *.blockmap latest-mac.yml "${archives[@]}" SHA256SUMS)
+          assets=(*.dmg *.zip *.exe *.blockmap latest-mac.yml latest.yml "${archives[@]}" SHA256SUMS)
           gh release create "v$VERSION" "${assets[@]}" \
             -R "$GITHUB_REPOSITORY" \
             --target "$BUILD_SHA" \
             --title "T3 Code $VERSION" \
-            --notes "macOS arm64 app and Linux x64 server of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
+            --notes "macOS arm64 and Windows x64 apps and the Linux x64 server of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
             --latest

@@ -10,10 +10,11 @@ copy of upstream. Upstream is fetch-only; pushing to it is disabled in the local
 2. The merge deletes upstream's workflows and actions again, and refuses any upstream change to `.github/workflows`,
    `.github/actions` or `.github/scripts/hanno-sync.sh`. Only the fork's own commits decide what runs with its secrets.
 3. When `hanno` changed outside `.github`, the sync publishes `<tag>-hanno.<n>` through `hanno-release.yml`: a macOS
-   arm64 build signed with the fork's self-signed certificate, and the Linux x64 server archive with its `SHA256SUMS`.
+   arm64 build signed with the fork's self-signed certificate, an unsigned Windows x64 installer, and the Linux x64
+   server archive with its `SHA256SUMS`.
    Both land in one release, and only commits already on `hanno` are built. The GitHub environment `release` holds the
-   certificate and accepts only branch `hanno`. The Mac app checks this repository's releases every 4 minutes and
-   updates itself. Servers run `t3 update`, which reads this repository's releases, never upstream's. On hulk a timer
+   certificate and accepts only branch `hanno`. The desktop apps check this repository's releases every 4 minutes
+   and update themselves. Servers run `t3 update`, which reads this repository's releases, never upstream's. On hulk a timer
    runs it every 15 minutes, and running threads continue after the restart.
 
 The signing certificate and its password are kept on hulk in `~/.config/t3code-fork` and as secrets of the `release`

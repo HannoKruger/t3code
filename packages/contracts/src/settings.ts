@@ -1106,10 +1106,27 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+const UsagePausePercent = Schema.Number.check(Schema.isBetween({ minimum: 1, maximum: 100 }));
+
+/**
+ * Pause running Claude threads before the account hits a usage limit, and
+ * resume them after it resets. The weekly window has its own, higher
+ * threshold because pausing at 90% of a week costs days of work.
+ */
+export const ClaudeUsagePauseSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  sessionPercent: UsagePausePercent.pipe(Schema.withDecodingDefault(Effect.succeed(90))),
+  weeklyPercent: UsagePausePercent.pipe(Schema.withDecodingDefault(Effect.succeed(98))),
+});
+export type ClaudeUsagePauseSettings = typeof ClaudeUsagePauseSettings.Type;
+
 export const ServerSettings = Schema.Struct({
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
+  ),
+  claudeUsagePause: ClaudeUsagePauseSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(ClaudeUsagePauseSettings)({}))),
   ),
   // How assistant text reaches clients during a turn. Deliberately a fresh
   // key (was `enableLegacyTokenStreaming`, before that
@@ -1492,6 +1509,13 @@ export const ServerSettingsPatch = Schema.Struct({
       worktreeUnchanged: Schema.optionalKey(Schema.Boolean),
       browserArtifactsAfterDays: Schema.optionalKey(StorageRetentionDays),
       logsAfterDays: Schema.optionalKey(StorageRetentionDays),
+    }),
+  ),
+  claudeUsagePause: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      sessionPercent: Schema.optionalKey(UsagePausePercent),
+      weeklyPercent: Schema.optionalKey(UsagePausePercent),
     }),
   ),
   // Server settings

@@ -61,6 +61,14 @@ Claude Code holds the turn until that window reopens, so it can keep showing as
 working. Wait for the reset, or stop the turn and continue later. The warning's
 timestamp shows when the displayed wait started.
 
+To avoid running out mid-turn, T3 Code pauses running Claude threads when the
+5-hour window reaches 90% or the weekly window reaches 98%. Each paused thread
+gets a message asking the agent to stop and write a short note on where it is.
+After three minutes it is stopped. The thread shows when it resumes, and it
+continues on its own after the limit resets. Sending a message to a paused
+thread takes it over and cancels the automatic resume. Change the thresholds or
+turn this off with `claudeUsagePause` in `settings.json`.
+
 ## Skills
 
 Claude skills come from the config directory's `skills` folder and the project's

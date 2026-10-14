@@ -14,9 +14,7 @@ copy of upstream. Upstream is fetch-only; pushing to it is disabled in the local
    server archive with its `SHA256SUMS`.
    Both land in one release, and only commits already on `hanno` are built. The GitHub environment `release` holds the
    certificate and accepts only branch `hanno`. The desktop apps check this repository's releases every 4 minutes
-   and update themselves. Servers update from this repository's releases, never upstream's. Publishing a
-   release sends GitHub's `release` webhook to plane-agent-runner, which asks hulk's server to update itself at once
-   through `POST /api/server/update`. Running threads continue after the restart. Nothing polls.
+   and update themselves. Servers update from this repository's releases, never upstream's.
 
 The signing certificate and its password are kept on hulk in `~/.config/t3code-fork` and as secrets of the `release`
 environment.

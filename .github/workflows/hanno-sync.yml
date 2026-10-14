@@ -145,6 +145,10 @@ jobs:
     needs: sync
     if: needs.sync.outputs.version != ''
     uses: ./.github/workflows/hanno-release.yml
+    # A called workflow only sees its environment's secrets (the signing
+    # certificate in `release`) when the caller passes secrets on. The
+    # repository itself has no secrets, so nothing else is handed over.
+    secrets: inherit
     with:
       version: ${{ needs.sync.outputs.version }}
       ref: ${{ needs.sync.outputs.sha }}

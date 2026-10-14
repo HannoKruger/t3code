@@ -3455,6 +3455,27 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("starts a server update over HTTP only for an authenticated operator", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const updateUrl = yield* getHttpServerUrl("/api/server/update");
+      const body = jsonRequestBody({ targetVersion: "0.0.45-hanno.2" });
+
+      const anonymous = yield* fetchEffect(updateUrl, { method: "POST", body });
+      assert.equal(anonymous.status, 401);
+
+      // The test server runs without the background service, so the update service refuses.
+      const operator = yield* fetchEffect(updateUrl, {
+        method: "POST",
+        headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+        body,
+      });
+      const failure = yield* responseJsonEffect<{ readonly reason: string }>(operator);
+      assert.equal(operator.status, 500);
+      assert.equal(failure.reason, "server_update_failed");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("does not expose internal cloud reconciliation over HTTP", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();

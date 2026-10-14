@@ -1,6 +1,7 @@
-# Builds the macOS arm64 desktop app of this fork, signed with the fork's
-# self-signed certificate, and publishes it as the newest GitHub release so the
-# app's built-in updater finds it.
+# Builds this fork's macOS arm64 desktop app, signed with the fork's
+# self-signed certificate, its Windows x64 installer, unsigned, and its Linux x64
+# server archive, then publishes them as the newest GitHub release. The desktop app's updater and `t3 update` on
+# Linux servers both read this repository's releases.
 name: Hanno release
 
 on:
@@ -11,7 +12,7 @@ on:
         required: true
         type: string
       ref:
-        description: "Commit or branch to build (default: the branch this runs on)"
+        description: "Commit or branch on hanno to build (default: the branch this runs on)"
         required: false
         type: string
   workflow_call:
@@ -30,23 +31,19 @@ concurrency:
   group: hanno-release
   cancel-in-progress: false
 
+env:
+  VERSION: ${{ inputs.version }}
+
 jobs:
-  release:
-    name: Build and publish macOS arm64
-    runs-on: macos-latest
-    timeout-minutes: 60
-    # The signing certificate lives in this environment, which only the hanno
-    # branch may deploy to.
-    environment: release
+  prepare:
+    name: Check version and commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
     env:
-      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
       BUILD_REF: ${{ inputs.ref || github.sha }}
-      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
-      T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY: Hanno Kruger T3 Code
-      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
-      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
-      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
-      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
     steps:
       - name: Check version
         run: |
@@ -58,9 +55,42 @@ jobs:
             echo "::error::Release v$VERSION already exists." >&2
             exit 1
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
 
+      # The signing certificate only ever signs reviewed code: a manual run may
+      # name any ref, so the commit must already be on hanno.
+      - name: Resolve the commit on hanno
+        id: commit
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init --quiet .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --quiet --no-tags --filter=blob:none origin "+refs/heads/hanno:refs/remotes/origin/hanno" "$BUILD_REF"
+          sha="$(git rev-parse FETCH_HEAD)"
+          if ! git merge-base --is-ancestor "$sha" origin/hanno; then
+            echo "::error::$BUILD_REF ($sha) is not on hanno." >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: Build macOS arm64
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # The signing certificate lives in this environment, which only the hanno
+    # branch may deploy to.
+    environment: release
+    env:
+      BUILD_SHA: ${{ needs.prepare.outputs.sha }}
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+      T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY: Hanno Kruger T3 Code
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+    steps:
       # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
       # .repos tree, so this checks out by hand and leaves .repos out.
       - name: Checkout
@@ -70,10 +100,9 @@ jobs:
           set -euo pipefail
           git init .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$BUILD_REF"
+          git fetch --no-tags --depth=1 origin "$BUILD_SHA"
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git -c checkout.workers=0 checkout --detach FETCH_HEAD
-          echo "BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -134,16 +163,215 @@ jobs:
           codesign -d -r- "$app"
           grep -q "^version: $VERSION$" release/latest-mac.yml
 
-      - name: Publish release
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-macos-arm64
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
+          retention-days: 1
+
+  windows:
+    name: Build Windows x64
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_SHA: ${{ needs.prepare.outputs.sha }}
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+    steps:
+      # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
+      # .repos tree, so this checks out by hand and leaves .repos out.
+      - name: Checkout
         env:
-          GH_TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$BUILD_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      # The resource monitor links against the Spectre-mitigated MSVC runtime,
+      # which the runner image does not install.
+      - name: Install Spectre-mitigated MSVC libs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      # Unsigned, because the fork has no Windows code-signing certificate.
+      # Without a WSL runtime archive the app runs agents natively on Windows only.
+      - name: Build desktop artifact
+        run: vp run dist:desktop:artifact --platform win --target nsis --arch x64 --build-version "$VERSION" --verbose
+
+      - name: Verify update manifest
+        run: |
+          grep -q "^version: $VERSION$" release/latest.yml
+
+      - name: Upload build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-windows-x64
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 1
+
+  server-linux-x64:
+    name: Build Linux x64 server
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BUILD_SHA: ${{ needs.prepare.outputs.sha }}
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
+    steps:
+      - name: Checkout
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$BUILD_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "$VERSION"
+
+      - name: Build server and web client
+        run: vp run --filter t3 build
+
+      # Same steps and Node version as upstream's release-desktop.yml; keep
+      # VP_NODE_VERSION in step with SEA_NODE_VERSION in apps/server/vite.config.ts.
+      - name: Build server single-executable
+        env:
+          VP_NODE_VERSION: "26.8.2"
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build resource monitor
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+
+      - name: Build server archive
+        run: |
+          node scripts/build-cli-archive.ts \
+            --platform linux \
+            --arch x64 \
+            --version "$VERSION" \
+            --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
+            --output-dir release-cli
+
+      - name: Smoke-test server archive
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "$VERSION"
+
+      - name: Upload server archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: server-linux-x64
+          path: release-cli/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # One release with every asset, so no updater ever sees a release that lacks
+  # its own platform's files.
+  publish:
+    name: Publish release
+    needs: [prepare, macos, windows, server-linux-x64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BUILD_SHA: ${{ needs.prepare.outputs.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Publish release
+        working-directory: release
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(release/*.dmg release/*.zip release/*.blockmap release/latest-mac.yml)
+          archives=(t3-*.tar.gz)
+          if [[ ${#archives[@]} -eq 0 ]]; then
+            echo "::error::No server archive was built." >&2
+            exit 1
+          fi
+          sha256sum "${archives[@]}" > SHA256SUMS
+          assets=(*.dmg *.zip *.exe *.blockmap latest-mac.yml latest.yml "${archives[@]}" SHA256SUMS)
           gh release create "v$VERSION" "${assets[@]}" \
             -R "$GITHUB_REPOSITORY" \
             --target "$BUILD_SHA" \
             --title "T3 Code $VERSION" \
-            --notes "macOS arm64 build of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
+            --notes "macOS arm64 and Windows x64 apps and the Linux x64 server of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
             --latest

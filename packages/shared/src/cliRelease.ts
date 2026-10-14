@@ -5,7 +5,9 @@
  * platform key, so a rename here is a release-breaking change.
  */
 
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+// This fork publishes its own server archives, so its servers update from its
+// releases and never back to an upstream build without the fork's changes.
+const CLI_RELEASE_REPOSITORY = "HannoKruger/t3code";
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 /** Overrides the download origin for mirrors and air-gapped installs. */
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
@@ -62,15 +64,6 @@ export function cliReleaseDownloadBaseUrl(
   baseUrl: string | undefined = CLI_RELEASE_DEFAULT_BASE_URL,
 ): string {
   return `${(baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL).replace(/\/+$/, "")}/v${version}`;
-}
-
-/**
- * The upstream release a fork build is based on. Fork builds are versioned
- * `<upstream>-hanno.<n>`, but CLI archives and npm packages exist only for the
- * upstream version.
- */
-export function upstreamReleaseVersion(version: string): string {
-  return version.replace(/-hanno\.\d+$/u, "");
 }
 
 /**

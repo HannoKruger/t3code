@@ -109,6 +109,18 @@ describe("versionSkew", () => {
     expect(resolveVersionMismatch("0.0.35-nightly.20260818.1124")).toBeNull();
   });
 
+  it("offers a fork server the client's own fork build", () => {
+    branding.APP_VERSION = "0.0.45-hanno.3";
+
+    expect(resolveVersionMismatch("0.0.45-hanno.2")).toEqual({
+      clientVersion: "0.0.45-hanno.3",
+      serverVersion: "0.0.45-hanno.2",
+      hint: MISMATCH_HINT,
+    });
+    expect(resolveVersionMismatch("0.0.45-hanno.3")).toBeNull();
+    expect(resolveVersionMismatch("0.0.45-hanno.4")).toBeNull();
+  });
+
   it("still warns when a nightly client outruns the server by a release", () => {
     branding.APP_VERSION = "0.0.35-nightly.20260818.1124";
 

@@ -10,8 +10,13 @@ copy of upstream. Upstream is fetch-only; pushing to it is disabled in the local
 2. The merge deletes upstream's workflows and actions again, and refuses any upstream change to `.github/workflows`,
    `.github/actions` or `.github/scripts/hanno-sync.sh`. Only the fork's own commits decide what runs with its secrets.
 3. When `hanno` changed outside `.github`, the sync publishes `<tag>-hanno.<n>` through `hanno-release.yml`: a macOS
-   arm64 build signed with the fork's self-signed certificate. The GitHub environment `release` holds that certificate
-   and accepts only branch `hanno`. The Mac app checks this repository's releases every 4 minutes and updates itself.
+   arm64 build signed with the fork's self-signed certificate, an unsigned Windows x64 installer, and the Linux x64
+   server archive with its `SHA256SUMS`.
+   Both land in one release, and only commits already on `hanno` are built. The GitHub environment `release` holds the
+   certificate and accepts only branch `hanno`. The desktop apps check this repository's releases every 4 minutes
+   and update themselves. Servers update from this repository's releases, never upstream's. Publishing a
+   release sends GitHub's `release` webhook to plane-agent-runner, which asks hulk's server to update itself at once
+   through `POST /api/server/update`. Running threads continue after the restart. Nothing polls.
 
 The signing certificate and its password are kept on hulk in `~/.config/t3code-fork` and as secrets of the `release`
 environment.
@@ -24,8 +29,8 @@ environment.
    API and files one Plane ticket per tag in project GeldBoom, "Merge upstream T3 Code <tag> into the hanno fork",
    assigned to Agent in Todo on Claude Sonnet, and starts it.
 3. The agent merges the tag on branch `sync/<tag>` (exactly that name), from `origin/hanno`, resolves the conflicts,
-   runs the checks, opens a pull request into `hanno` and turns on auto-merge with a merge commit.
-4. Two required checks run on the pull request. `hanno-pull-request-check.yml` ("Verify pull request") runs on
+   runs the checks and opens a pull request into `hanno`.
+4. Two checks run on the pull request. `hanno-pull-request-check.yml` ("Verify pull request") runs on
    `pull_request_target`, so its definition always comes from `hanno`, with a read-only token, no secret and no
    environment. It never runs the pull request's code: it fetches the head as git data and runs `hanno`'s copy of
    `hanno-sync.sh check-pull-request`. That accepts only a branch of this repository named `sync/<tag>`, where the tag
@@ -34,15 +39,14 @@ environment.
    the upstream tag `hanno` was last synced to. Renames count as a deletion plus an addition.
    `hanno-pull-request-tests.yml` ("Test pull request") runs the pull request's code on `pull_request`: the carried pull
    requests' tests and the web and desktop typechecks. The gate refuses any change to that file, so it cannot be weakened.
-5. Auto-merge lands the pull request. That push starts the sync, which finds the tag merged and publishes the release.
+5. Once both checks pass, the agent merges the pull request with a merge commit. That push starts the sync, which finds
+   the tag merged and publishes the release.
 
 ## Rules on `hanno`
 
-A repository ruleset protects `hanno`: no deletion, no force-push, changes only through a pull request merged with a
-merge commit, and the checks "Verify pull request" and "Test pull request" must pass. Only the sync's deploy key
-(GitHub environment `sync`) bypasses it, for its own clean merges. Since only `sync/<tag>` pull requests pass the gate,
-changing the fork's own commits or workflows means turning the ruleset off (Settings, Rules), pushing, and turning it
-back on. A push that changes workflow files publishes nothing from its own sync run.
+No ruleset protects `hanno`: the fork's own commits are pushed straight to it. The sync still refuses upstream changes
+to `.github/workflows`, `.github/actions` and `.github/scripts/hanno-sync.sh`, so only this fork decides what runs with
+its secrets, and the release only builds commits that are on `hanno`.
 
 ## Carried upstream pull requests
 

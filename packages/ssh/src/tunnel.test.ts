@@ -211,6 +211,9 @@ describe("ssh tunnel scripts", () => {
     assert.include(launch, '"$RUNNER_FILE" update "$REMOTE_APP_VERSION" --yes');
     assert.include(launch, 'grep -q \'"serviceManaged":true\' "$DEFAULT_RUNTIME_FILE"');
     assert.include(launch, "which is older than this app (%s)");
+    // Only a desktop app's server is refused; an orphaned headless one is replaced.
+    assert.include(launch, '[ -f "$DEFAULT_SERVER_HOME/userdata/desktop-settings.json" ]');
+    assert.include(launch, "Replacing an older headless T3 server");
     // A source checkout has no release version to compare against.
     assert.include(SshTunnel.buildRemoteLaunchScript(NODE_SCRIPT), "REMOTE_APP_VERSION=''");
   });

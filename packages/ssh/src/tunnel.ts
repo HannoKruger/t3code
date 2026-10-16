@@ -736,9 +736,10 @@ if [ -n "$DEFAULT_RUNTIME_INFO" ]; then
 fi
 # A client cannot talk to an older server, and joining one only shows up as a
 # connection setup timeout. A background service is updated to this app's
-# version before it is joined; any other older server, such as another desktop
-# app's built-in one, is reported instead. Servers from before 0.1.0 publish
-# no version and count as older.
+# version before it is joined. A desktop app's built-in server belongs to that
+# app, so it is reported instead. Any other older server is a headless one an
+# SSH launch started and lost track of, so it is replaced. Servers from before
+# 0.1.0 publish no version and count as older.
 REMOTE_APP_VERSION=@@T3_ARCHIVE_VERSION@@
 default_runtime_version() {
   DEFAULT_RUNTIME_VERSION="$(sed -n 's/.*"serverVersion":"\\([^"]*\\)".*/\\1/p' "$DEFAULT_RUNTIME_FILE" 2>/dev/null | head -n 1)"
@@ -770,9 +771,27 @@ if [ "$T3_ARCHIVE_MODE" = "1" ] && [ -n "$DEFAULT_RUNTIME_PID" ] \\
     DEFAULT_RUNTIME_INFO="$(resolve_default_runtime_port 2>/dev/null || true)"
     DEFAULT_RUNTIME_PID="\${DEFAULT_RUNTIME_INFO%% *}"
     DEFAULT_REMOTE_PORT="\${DEFAULT_RUNTIME_INFO#* }"
-  else
+  elif [ -f "$DEFAULT_SERVER_HOME/userdata/desktop-settings.json" ]; then
     printf 'This host already runs T3 Code %s (PID %s, port %s), which is older than this app (%s). Update or quit the T3 Code app on this host, then retry.\\n' "$OLDER_VERSION" "$DEFAULT_RUNTIME_PID" "$DEFAULT_REMOTE_PORT" "$REMOTE_APP_VERSION" >&2
     exit 1
+  else
+    printf 'Replacing an older headless T3 server %s (PID %s) with %s.\\n' "$OLDER_VERSION" "$DEFAULT_RUNTIME_PID" "$REMOTE_APP_VERSION" >>"$LOG_FILE"
+    stop_process "$DEFAULT_RUNTIME_PID"
+    STOP_WAITED=0
+    while process_alive "$DEFAULT_RUNTIME_PID" && [ "$STOP_WAITED" -lt 100 ]; do
+      sleep 0.1
+      STOP_WAITED=$((STOP_WAITED + 1))
+    done
+    if process_alive "$DEFAULT_RUNTIME_PID"; then
+      printf 'The older T3 server %s (PID %s) on this host did not stop within 10 seconds.\\n' "$OLDER_VERSION" "$DEFAULT_RUNTIME_PID" >&2
+      exit 1
+    fi
+    DEFAULT_RUNTIME_INFO=""
+    DEFAULT_RUNTIME_PID=""
+    DEFAULT_REMOTE_PORT=""
+    REMOTE_PID=""
+    REMOTE_MANAGED=""
+    rm -f "$PID_FILE" "$MANAGED_FILE"
   fi
 fi
 # The managed server runs on the default home, so it writes the default

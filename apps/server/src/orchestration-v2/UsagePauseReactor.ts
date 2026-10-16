@@ -66,16 +66,20 @@ interface RecordedPause extends UsagePauseRecord {
 
 /** Pause messages carry their thread, window and reset in the id; resume messages name the pause. */
 function readRecordedPauses(
-  pauseMessages: ReadonlyArray<{ readonly messageId: string; readonly createdAt: DateTime.Utc }>,
+  pauseMessages: ReadonlyArray<{
+    readonly messageId: string;
+    readonly threadId: ThreadId;
+    readonly createdAt: DateTime.Utc;
+  }>,
   resumeMessageIds: ReadonlySet<string>,
 ): ReadonlyArray<RecordedPause> {
   return pauseMessages.flatMap((message) => {
-    const pause = readUsagePauseMessageId(message.messageId);
+    const pause = readUsagePauseMessageId(message.threadId, message.messageId);
     if (pause === null) return [];
     return [
       {
         id: message.messageId,
-        threadId: ThreadId.make(pause.threadId),
+        threadId: message.threadId,
         windowId: pause.windowId,
         createdAt: DateTime.formatIso(message.createdAt),
         resetsAt: pause.resetsAt,

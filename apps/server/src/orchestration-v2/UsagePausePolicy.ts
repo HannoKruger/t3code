@@ -119,19 +119,26 @@ export function usageResumeMessageId(pauseId: string): string {
   return `usage-resume:${pauseId}`;
 }
 
-export function readUsagePauseMessageId(messageId: string): {
-  readonly threadId: string;
+/** Thread ids may contain colons, so the id is read after the thread the message belongs to. */
+export function readUsagePauseMessageId(
+  threadId: ThreadId,
+  messageId: string,
+): {
   readonly windowId: string;
   readonly resetsAt: string;
   readonly resumeAt: string;
 } | null {
-  const match = /^usage-pause:([^:]+):([^:]+):(.+)$/.exec(messageId);
-  if (match === null || Number.isNaN(Date.parse(match[3]!))) return null;
+  const threadPrefix = `${USAGE_PAUSE_MESSAGE_PREFIX}${threadId}:`;
+  if (!messageId.startsWith(threadPrefix)) return null;
+  const limitKey = messageId.slice(threadPrefix.length);
+  const separator = limitKey.indexOf(":");
+  if (separator <= 0) return null;
+  const resetsAt = limitKey.slice(separator + 1);
+  if (Number.isNaN(Date.parse(resetsAt))) return null;
   return {
-    threadId: match[1]!,
-    windowId: match[2]!,
-    resetsAt: match[3]!,
-    resumeAt: resumeAtFor(match[3]!),
+    windowId: limitKey.slice(0, separator),
+    resetsAt,
+    resumeAt: resumeAtFor(resetsAt),
   };
 }
 

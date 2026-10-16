@@ -104,13 +104,21 @@ describe("usage pause message ids", () => {
   it("round-trips the thread, window and reset that identify one pause", () => {
     const id = usagePauseMessageId(THREAD_ID, sessionLimit);
     expect(id).toBe("usage-pause:thread-1:five_hour:2026-10-14T12:00:00.000Z");
-    expect(readUsagePauseMessageId(id)).toEqual({
-      threadId: "thread-1",
+    expect(readUsagePauseMessageId(THREAD_ID, id)).toEqual({
       windowId: "five_hour",
       resetsAt: SESSION_RESET,
       resumeAt: "2026-10-14T12:02:00.000Z",
     });
-    expect(readUsagePauseMessageId("message-1")).toBeNull();
+    expect(readUsagePauseMessageId(THREAD_ID, "message-1")).toBeNull();
+  });
+
+  it("reads the pause of a thread whose id contains colons", () => {
+    const threadId = ThreadId.make("thread:scheduled:1");
+    expect(readUsagePauseMessageId(threadId, usagePauseMessageId(threadId, sessionLimit))).toEqual({
+      windowId: "five_hour",
+      resetsAt: SESSION_RESET,
+      resumeAt: "2026-10-14T12:02:00.000Z",
+    });
   });
 });
 

@@ -62,8 +62,9 @@ working. Wait for the reset, or stop the turn and continue later. The warning's
 timestamp shows when the displayed wait started.
 
 To avoid running out mid-turn, T3 Code pauses running Claude threads when the
-5-hour window reaches 90% or the weekly window reaches 98%. Only threads running at
-that moment are paused; threads you start afterwards keep running. Each paused thread
+5-hour window reaches 90% or the weekly window reaches 98%. Only threads working at
+that moment are paused, including threads whose subagents or background tasks are still
+running; threads you start afterwards keep running. Each paused thread
 gets a message asking the agent to stop and write a short note on where it is.
 After three minutes it is stopped. The thread shows when it resumes, and it
 continues on its own after the limit resets. Sending a message to a paused

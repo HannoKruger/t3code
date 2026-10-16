@@ -62,7 +62,7 @@ const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 
 const wrapUpMessage = (payload: UsagePausePayload) =>
   `[Usage pause] Claude ${usagePauseWindowName(payload)} usage is at ${Math.round(payload.usedPercent)}%. ` +
-  "Stop now: do not start new work, tools or subagents, and stop any subagents that are running. " +
+  "Stop now: do not start new work, tools or subagents, and stop every subagent and background task that is still running. " +
   "Reply with a short note of where you are and what is left, then end your turn. " +
   "This thread resumes automatically after the limit resets.";
 const RESUME_MESSAGE =
@@ -121,8 +121,13 @@ function providerInstanceOf(thread: OrchestrationThreadShell): ProviderInstanceI
   return thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
 }
 
+/** Working means spending usage: a running turn, or subagents and background tasks a finished turn left behind. */
 function isRunning(thread: OrchestrationThreadShell): boolean {
-  return thread.session?.status === "running" || thread.session?.status === "starting";
+  return (
+    thread.session?.status === "running" ||
+    thread.session?.status === "starting" ||
+    (thread.backgroundLiveness ?? null) !== null
+  );
 }
 
 /** @public Service construction is part of the canonical Effect module API. */
@@ -184,13 +189,24 @@ export const make = Effect.gen(function* () {
       case "pause":
         return yield* pauseThread(thread, action, createdAt);
       case "interrupt":
-        return yield* engine.dispatch({
-          type: "thread.turn.interrupt",
-          commandId: CommandId.make(`server:usage-pause-interrupt:${action.pauseId}`),
-          threadId: thread.id,
-          ...(action.turnId === null ? {} : { turnId: action.turnId }),
-          createdAt,
-        });
+        // Without a turn there is nothing to interrupt, so stopping the session ends the
+        // subagents and background tasks; the resume starts it again.
+        return yield* engine.dispatch(
+          action.turnId === null
+            ? {
+                type: "thread.session.stop",
+                commandId: CommandId.make(`server:usage-pause-stop:${action.pauseId}`),
+                threadId: thread.id,
+                createdAt,
+              }
+            : {
+                type: "thread.turn.interrupt",
+                commandId: CommandId.make(`server:usage-pause-interrupt:${action.pauseId}`),
+                threadId: thread.id,
+                turnId: action.turnId,
+                createdAt,
+              },
+        );
       case "resume":
         return yield* engine.dispatch({
           type: "thread.turn.start",

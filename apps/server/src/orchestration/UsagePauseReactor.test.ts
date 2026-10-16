@@ -231,6 +231,39 @@ describe("UsagePauseReactor", () => {
     }),
   );
 
+  it.effect("pauses a thread whose turn ended while its background agents keep working", () =>
+    Effect.gen(function* () {
+      const commands = yield* runSweep({
+        threads: [makeThread({ running: false, backgroundLiveness: "working" })],
+        providers: [makeProvider(CLAUDE_INSTANCE, "claudeAgent", [sessionWindow(95)])],
+      });
+      assert.deepStrictEqual(
+        commands.map((command) => command.type),
+        ["thread.turn.start", "thread.activity.append"],
+      );
+    }),
+  );
+
+  it.effect("stops the session of a paused thread that only has background work left", () =>
+    Effect.gen(function* () {
+      const commands = yield* runSweep({
+        threads: [
+          makeThread({
+            running: false,
+            backgroundLiveness: "working",
+            latestUserMessageAt: "2026-10-14T09:50:00.000Z",
+          }),
+        ],
+        providers: [makeProvider(CLAUDE_INSTANCE, "claudeAgent", [sessionWindow(95)])],
+        activities: [pauseActivity("2026-10-14T09:50:00.000Z", "2026-10-14T12:02:00.000Z")],
+      });
+      assert.deepStrictEqual(
+        commands.map((command) => command.type),
+        ["thread.session.stop"],
+      );
+    }),
+  );
+
   it.effect("leaves threads on other providers running", () =>
     Effect.gen(function* () {
       const commands = yield* runSweep({

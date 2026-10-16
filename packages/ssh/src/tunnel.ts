@@ -466,8 +466,31 @@ fi
 # Unpacked into the pinned-runtime layout so \`t3 service install\` reuses it.
 T3_RELEASE_BASE_URL=@@T3_RELEASE_BASE_URL@@
 T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"
+case "$(uname -s)" in
+  Darwin) T3_PLATFORM="darwin" ;;
+  Linux) T3_PLATFORM="linux" ;;
+  # Git Bash or MSYS2 as the login shell of a Windows OpenSSH server.
+  MINGW* | MSYS* | CYGWIN*) T3_PLATFORM="win32" ;;
+  *) T3_PLATFORM="" ;;
+esac
+if [ "$T3_PLATFORM" = "win32" ]; then
+  T3_EXECUTABLE="t3.exe"
+  T3_ARCHIVE_EXTENSION="zip"
+else
+  T3_EXECUTABLE="t3"
+  T3_ARCHIVE_EXTENSION="tar.gz"
+fi
 t3_runtime_ready() {
-  [ -x "$T3_RUNTIME_DIR/t3" ] && [ "$(cat "$T3_RUNTIME_DIR/.install-complete" 2>/dev/null)" = "$T3_ARCHIVE_VERSION" ]
+  [ -x "$T3_RUNTIME_DIR/$T3_EXECUTABLE" ] && [ "$(cat "$T3_RUNTIME_DIR/.install-complete" 2>/dev/null)" = "$T3_ARCHIVE_VERSION" ]
+}
+t3_extract() {
+  if [ "$T3_PLATFORM" = "win32" ]; then
+    # Only the bsdtar Windows ships in System32 reads zip; the GNU tar of Git
+    # for Windows, first on PATH, cannot.
+    "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -xf "$1" -C "$2" --strip-components=1
+  else
+    tar -xzf "$1" -C "$2" --strip-components=1
+  fi
 }
 if ! t3_runtime_ready; then
   mkdir -p "$HOME/.t3/runtime/versions"
@@ -510,17 +533,15 @@ if ! t3_runtime_ready; then
   trap 'rm -rf "$T3_LOCK"' EXIT
 fi
 if ! t3_runtime_ready; then
-  case "$(uname -s)" in
-    Darwin) T3_PLATFORM="darwin" ;;
-    Linux) T3_PLATFORM="linux" ;;
-    *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -s)" >&2; exit 1 ;;
-  esac
+  if [ -z "$T3_PLATFORM" ]; then
+    printf 'Remote host %s has no t3 release archive.\\n' "$(uname -s)" >&2; exit 1
+  fi
   case "$(uname -m)" in
     arm64 | aarch64) T3_ARCH="arm64" ;;
     x86_64 | amd64) T3_ARCH="x64" ;;
     *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -m)" >&2; exit 1 ;;
   esac
-  T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"
+  T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.$T3_ARCHIVE_EXTENSION"
   T3_STAGING="$(mktemp -d "$HOME/.t3/runtime/versions/.staging-XXXXXX")"
   trap 'rm -rf "$T3_STAGING" "$T3_LOCK"' EXIT
   t3_fetch() {
@@ -540,11 +561,11 @@ if ! t3_runtime_ready; then
   if [ -z "$T3_EXPECTED" ] || [ "$T3_ACTUAL" != "$T3_EXPECTED" ]; then
     printf 'Checksum mismatch for %s.\\n' "$T3_ARCHIVE" >&2; exit 1
   fi
-  tar -xzf "$T3_STAGING/$T3_ARCHIVE" -C "$T3_STAGING" --strip-components=1
+  t3_extract "$T3_STAGING/$T3_ARCHIVE" "$T3_STAGING"
   rm -f "$T3_STAGING/$T3_ARCHIVE" "$T3_STAGING/SHA256SUMS"
   # Prove the binary runs here (libc, arch) before marking it ready, or every
   # later launch would exec a broken install instead of retrying.
-  if ! "$T3_STAGING/t3" --version >/dev/null 2>&1; then
+  if ! "$T3_STAGING/$T3_EXECUTABLE" --version >/dev/null 2>&1; then
     printf 'The t3 %s executable does not run on this host.\\n' "$T3_ARCHIVE_VERSION" >&2; exit 1
   fi
   printf '%s\\n' "$T3_ARCHIVE_VERSION" > "$T3_STAGING/.install-complete"
@@ -555,11 +576,58 @@ if [ -n "\${T3_LOCK:-}" ]; then
   rm -rf "$T3_LOCK"
   trap - EXIT
 fi
-exec "$T3_RUNTIME_DIR/t3" "$@"
+if [ "\${1:-}" = "__runner-executable" ]; then
+  printf '%s\\n' "$T3_RUNTIME_DIR/$T3_EXECUTABLE"
+  exit 0
+fi
+exec "$T3_RUNTIME_DIR/$T3_EXECUTABLE" "$@"
 `;
+
+// Git Bash cannot signal or see a native Windows process it did not start,
+// so on Windows a server is tracked by its Windows PID through tasklist and
+// stopped as a whole tree through taskkill.
+const REMOTE_PROCESS_SCRIPT = `case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) REMOTE_WINDOWS=1 ;;
+  *) REMOTE_WINDOWS=0 ;;
+esac
+process_alive() {
+  [ -n "$1" ] || return 1
+  if [ "$REMOTE_WINDOWS" = "1" ]; then
+    tasklist //FI "PID eq $1" //NH 2>/dev/null | grep -q " $1 "
+  else
+    kill -0 "$1" 2>/dev/null
+  fi
+}
+stop_process() {
+  if [ "$REMOTE_WINDOWS" = "1" ]; then
+    taskkill //PID "$1" //T //F >/dev/null 2>&1 || true
+  else
+    kill "$1" 2>/dev/null || true
+  fi
+}`;
+
+// Windows OpenSSH keeps the channel open while any process started in the
+// session runs, and tears such processes down when it closes, so a server
+// started there either hangs the launch or dies with it. WMI starts the
+// server outside the session, under a cmd.exe that carries the environment
+// and the log redirection. The state files record t3.exe's own PID, the one
+// the server publishes in server-runtime.json, so a reconnect recognises it.
+const REMOTE_WINDOWS_START_SCRIPT = `$ProgressPreference = 'SilentlyContinue'
+$commandLine = 'cmd.exe /d /s /c "set T3CODE_NO_BROWSER=1&& "' + $env:T3_SERVE_EXECUTABLE +
+  '" serve --host 127.0.0.1 --port ' + $env:T3_SERVE_PORT + ' --base-dir "' + $env:T3_SERVE_HOME +
+  '" >>"' + $env:T3_SERVE_LOG + '" 2>&1"'
+$shell = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine }
+if ($shell.ReturnValue -ne 0) { exit 1 }
+for ($attempt = 0; $attempt -lt 100; $attempt++) {
+  $server = Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId = $($shell.ProcessId) AND Name = 't3.exe'"
+  if ($server) { [Console]::Out.Write(@($server)[0].ProcessId); exit 0 }
+  Start-Sleep -Milliseconds 100
+}
+exit 1`;
 
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@T3_NODE_ENV_SCRIPT@@
+@@T3_PROCESS_SCRIPT@@
 STATE_KEY="$1"
 STATE_DIR="$HOME/.t3/ssh-launch/$STATE_KEY"
 DEFAULT_SERVER_HOME="$HOME/.t3"
@@ -615,7 +683,7 @@ NODE
 wait_for_pid_exit() {
   PID_TO_WAIT="$1"
   WAIT_COUNT=0
-  while kill -0 "$PID_TO_WAIT" 2>/dev/null && [ "$WAIT_COUNT" -lt 20 ]; do
+  while process_alive "$PID_TO_WAIT" && [ "$WAIT_COUNT" -lt 20 ]; do
     WAIT_COUNT=$((WAIT_COUNT + 1))
     sleep 0.1
   done
@@ -623,7 +691,8 @@ wait_for_pid_exit() {
 # kill -0 also succeeds for a server that exited but was not reaped yet, so
 # a zombie does not count as running. Without ps to tell, trust kill -0.
 server_running() {
-  [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+  process_alive "$1" || return 1
+  [ "$REMOTE_WINDOWS" = "1" ] && return 0
   case "$(ps -o stat= -p "$1" 2>/dev/null || true)" in
     *Z*) return 1 ;;
   esac
@@ -676,8 +745,8 @@ elif [ -n "$DEFAULT_REMOTE_PORT" ]; then
   if wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
     ADOPTED_PID="$DEFAULT_RUNTIME_PID"
     if [ "$REMOTE_MANAGED" = "managed" ]; then
-      if [ -n "$REMOTE_PID" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
-        kill "$REMOTE_PID" 2>/dev/null || true
+      if process_alive "$REMOTE_PID"; then
+        stop_process "$REMOTE_PID"
         wait_for_pid_exit "$REMOTE_PID"
       fi
       REMOTE_PID=""
@@ -712,7 +781,7 @@ elif [ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && server_running "$REMOTE_PI
   # Reconnect owns the local tunnel, not the lifetime of an already running
   # server. A changed runner is the update path and still replaces it.
   if [ "$RUNNER_CHANGED" -eq 1 ]; then
-    kill "$REMOTE_PID" 2>/dev/null || true
+    stop_process "$REMOTE_PID"
     wait_for_pid_exit "$REMOTE_PID"
     REMOTE_PID=""
     REMOTE_PORT=""
@@ -736,8 +805,20 @@ if [ -z "$REMOTE_PORT" ]; then
     fi
     exit 1
   fi
-  nohup env T3CODE_NO_BROWSER=1 "$RUNNER_FILE" serve --host 127.0.0.1 --port "$REMOTE_PORT" --base-dir "$DEFAULT_SERVER_HOME" >>"$LOG_FILE" 2>&1 < /dev/null &
-  REMOTE_PID="$!"
+  if [ "$REMOTE_WINDOWS" = "1" ] && [ "$T3_ARCHIVE_MODE" = "1" ]; then
+    REMOTE_PID="$(T3_SERVE_EXECUTABLE="$(cygpath -w "$("$RUNNER_FILE" __runner-executable)")" \\
+      T3_SERVE_PORT="$REMOTE_PORT" \\
+      T3_SERVE_HOME="$(cygpath -w "$DEFAULT_SERVER_HOME")" \\
+      T3_SERVE_LOG="$(cygpath -w "$LOG_FILE")" \\
+      powershell.exe -NoProfile -NonInteractive -EncodedCommand @@T3_WINDOWS_START_COMMAND@@ || true)"
+    if [ -z "$REMOTE_PID" ]; then
+      printf 'Failed to start the T3 server on the remote Windows host.\\n' >&2
+      exit 1
+    fi
+  else
+    nohup env T3CODE_NO_BROWSER=1 "$RUNNER_FILE" serve --host 127.0.0.1 --port "$REMOTE_PORT" --base-dir "$DEFAULT_SERVER_HOME" >>"$LOG_FILE" 2>&1 < /dev/null &
+    REMOTE_PID="$!"
+  fi
   printf '%s\\n' "$REMOTE_PID" >"$PID_FILE"
   printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
   printf 'managed\\n' >"$MANAGED_FILE"
@@ -748,7 +829,7 @@ if [ -z "$REMOTE_PORT" ]; then
     else
       printf 'It wrote nothing to %s, so it exited before producing any output.\\n' "$LOG_FILE" >&2
     fi
-    kill "$REMOTE_PID" 2>/dev/null || true
+    stop_process "$REMOTE_PID"
     wait_for_pid_exit "$REMOTE_PID"
     rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"
     exit 1
@@ -771,20 +852,21 @@ PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
 `;
 
 const REMOTE_STOP_SCRIPT = `set -eu
+@@T3_PROCESS_SCRIPT@@
 STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
 PID_FILE="$STATE_DIR/pid"
 PORT_FILE="$STATE_DIR/port"
 MANAGED_FILE="$STATE_DIR/managed"
 REMOTE_MANAGED="$(cat "$MANAGED_FILE" 2>/dev/null || true)"
 REMOTE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-if [ "$REMOTE_MANAGED" != "external" ] && [ -n "$REMOTE_PID" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
-  kill "$REMOTE_PID" 2>/dev/null || true
+if [ "$REMOTE_MANAGED" != "external" ] && process_alive "$REMOTE_PID"; then
+  stop_process "$REMOTE_PID"
   WAIT_COUNT=0
-  while kill -0 "$REMOTE_PID" 2>/dev/null && [ "$WAIT_COUNT" -lt 20 ]; do
+  while process_alive "$REMOTE_PID" && [ "$WAIT_COUNT" -lt 20 ]; do
     WAIT_COUNT=$((WAIT_COUNT + 1))
     sleep 0.1
   done
-  if kill -0 "$REMOTE_PID" 2>/dev/null; then
+  if process_alive "$REMOTE_PID"; then
     printf 'Remote T3 server with PID %s did not stop within 2 seconds. Its ownership files were kept.\\n' "$REMOTE_PID" >&2
     exit 1
   fi
@@ -873,6 +955,10 @@ export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
     T3_READY_TIMEOUT_MS: String(REMOTE_READY_TIMEOUT_MS),
     T3_REUSE_READY_TIMEOUT_MS: String(REMOTE_REUSE_READY_TIMEOUT_MS),
     T3_READY_PROBE_TIMEOUT_MS: String(SSH_READY_PROBE_TIMEOUT_MS),
+    T3_PROCESS_SCRIPT: REMOTE_PROCESS_SCRIPT,
+    T3_WINDOWS_START_COMMAND: Buffer.from(REMOTE_WINDOWS_START_SCRIPT, "utf16le").toString(
+      "base64",
+    ),
   });
 }
 
@@ -886,6 +972,7 @@ export function buildRemotePairingScript(stateKey: string, input?: RemoteT3Runne
 export function buildRemoteStopScript(stateKey: string): string {
   return applyScriptPlaceholders(REMOTE_STOP_SCRIPT, {
     T3_STATE_KEY: stateKey,
+    T3_PROCESS_SCRIPT: REMOTE_PROCESS_SCRIPT,
   });
 }
 

@@ -1,7 +1,7 @@
 # Builds this fork's macOS arm64 desktop app, signed with the fork's
 # self-signed certificate, its Windows x64 installer, unsigned, and its Linux x64,
-# Linux arm64 and macOS arm64 server archives, then publishes them as the newest
-# GitHub release. The desktop app's updater, `t3 update` on servers, and SSH
+# Linux arm64, macOS arm64 and Windows x64 server archives, then publishes them as
+# the newest GitHub release. The desktop app's updater, `t3 update` on servers, and SSH
 # remotes all read this repository's releases.
 name: Hanno release
 
@@ -277,6 +277,9 @@ jobs:
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: true
       matrix:
@@ -299,6 +302,13 @@ jobs:
             arch: arm64
             platform_key: darwin-arm64
             rust_target: aarch64-apple-darwin
+          # Windows SSH remotes run Git Bash, which installs this zip.
+          - label: Windows x64
+            runner: windows-latest
+            platform: win
+            arch: x64
+            platform_key: win32-x64
+            rust_target: x86_64-pc-windows-msvc
     env:
       BUILD_SHA: ${{ needs.prepare.outputs.sha }}
       PLATFORM: ${{ matrix.platform }}
@@ -350,12 +360,35 @@ jobs:
           VP_NODE_VERSION: "26.8.2"
         run: node apps/server/scripts/cli.ts build-exe --verbose
 
+      # The resource monitor links against the Spectre-mitigated MSVC runtime,
+      # which the runner image does not install.
+      - name: Install Spectre-mitigated MSVC libs
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
       - name: Build resource monitor
         run: |
           set -euo pipefail
+          binary_name="t3-resource-monitor"
+          if [[ "$PLATFORM" == "win" ]]; then
+            binary_name="$binary_name.exe"
+          fi
           cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target "$RUST_TARGET"
           mkdir -p "$RUNNER_TEMP/cli-resource-monitor/$PLATFORM_KEY"
-          cp "native/resource-monitor/target/$RUST_TARGET/release/t3-resource-monitor" "$RUNNER_TEMP/cli-resource-monitor/$PLATFORM_KEY/"
+          cp "native/resource-monitor/target/$RUST_TARGET/release/$binary_name" "$RUNNER_TEMP/cli-resource-monitor/$PLATFORM_KEY/"
 
       - name: Build server archive
         run: |
@@ -399,16 +432,16 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          archives=(t3-*.tar.gz)
-          if [[ ${#archives[@]} -eq 0 ]]; then
-            echo "::error::No server archive was built." >&2
+          archives=(t3-*.tar.gz t3-*.zip)
+          if [[ ${#archives[@]} -ne 4 ]]; then
+            echo "::error::Expected 4 server archives, found ${#archives[@]}: ${archives[*]}" >&2
             exit 1
           fi
           sha256sum "${archives[@]}" > SHA256SUMS
-          assets=(*.dmg *.zip *.exe *.blockmap latest-mac.yml latest.yml "${archives[@]}" SHA256SUMS)
+          assets=(*.dmg T3-Code-*.zip *.exe *.blockmap latest-mac.yml latest.yml "${archives[@]}" SHA256SUMS)
           gh release create "v$VERSION" "${assets[@]}" \
             -R "$GITHUB_REPOSITORY" \
             --target "$BUILD_SHA" \
             --title "T3 Code $VERSION" \
-            --notes "macOS arm64 and Windows x64 apps and the Linux x64, Linux arm64 and macOS arm64 servers of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
+            --notes "macOS arm64 and Windows x64 apps and the Linux x64, Linux arm64, macOS arm64 and Windows x64 servers of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
             --latest

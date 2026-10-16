@@ -111,9 +111,12 @@ describe("ssh tunnel scripts", () => {
       "T3_RELEASE_BASE_URL='https://github.com/HannoKruger/t3code/releases/download'",
     );
     assert.include(script, 'T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"');
-    assert.include(script, 'T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"');
+    assert.include(
+      script,
+      'T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.$T3_ARCHIVE_EXTENSION"',
+    );
     assert.include(script, "SHA256SUMS");
-    assert.include(script, 'exec "$T3_RUNTIME_DIR/t3" "$@"');
+    assert.include(script, 'exec "$T3_RUNTIME_DIR/$T3_EXECUTABLE" "$@"');
     assert.notInclude(script, "npx");
     assert.notInclude(script, "npm exec");
     assert.notInclude(script, "t3@latest");
@@ -162,6 +165,43 @@ describe("ssh tunnel scripts", () => {
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper wait-ready "$REMOTE_PORT"');
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper runtime-port "$DEFAULT_RUNTIME_FILE"');
     assert.include(SshTunnel.buildRemoteLaunchScript(NODE_SCRIPT), "T3_ARCHIVE_MODE=0");
+  });
+
+  it("installs the zip and runs t3.exe from Git Bash on Windows", () => {
+    const script = SshTunnel.buildRemoteT3RunnerScript(ARCHIVE);
+
+    assert.include(script, 'MINGW* | MSYS* | CYGWIN*) T3_PLATFORM="win32" ;;');
+    assert.include(script, 'T3_EXECUTABLE="t3.exe"');
+    assert.include(script, 'T3_ARCHIVE_EXTENSION="zip"');
+    // Git for Windows' GNU tar cannot read zip; the System32 bsdtar can.
+    assert.include(script, '"$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -xf');
+    assert.include(script, '[ -x "$T3_RUNTIME_DIR/$T3_EXECUTABLE" ]');
+    assert.include(script, '"__runner-executable"');
+  });
+
+  it("starts a Windows server outside the SSH session and tracks it by Windows PID", () => {
+    const launch = SshTunnel.buildRemoteLaunchScript(ARCHIVE);
+    const stop = SshTunnel.buildRemoteStopScript("state-key");
+
+    for (const script of [launch, stop]) {
+      assert.include(script, "MINGW* | MSYS* | CYGWIN*) REMOTE_WINDOWS=1 ;;");
+      assert.include(script, 'tasklist //FI "PID eq $1" //NH');
+      assert.include(script, 'taskkill //PID "$1" //T //F');
+    }
+    assert.include(launch, '[ "$REMOTE_WINDOWS" = "1" ] && [ "$T3_ARCHIVE_MODE" = "1" ]');
+    assert.include(launch, '"$RUNNER_FILE" __runner-executable');
+    assert.notInclude(launch, "@@");
+    assert.notInclude(stop, "@@");
+
+    const encoded = /-EncodedCommand ([A-Za-z0-9+/=]+)/u.exec(launch)?.[1];
+    assert.isDefined(encoded);
+    const powershell = Buffer.from(encoded ?? "", "base64").toString("utf16le");
+    assert.include(powershell, "Invoke-CimMethod -ClassName Win32_Process -MethodName Create");
+    // The recorded PID must be t3.exe's, the one server-runtime.json names,
+    // or a reconnect mistakes its own server for another one and replaces it.
+    assert.include(powershell, "Name = 't3.exe'");
+    assert.include(powershell, "--base-dir");
+    assert.include(powershell, "T3CODE_NO_BROWSER=1");
   });
 
   it("rejects archive versions that are not a single exact version segment", () => {
@@ -258,7 +298,7 @@ describe("ssh tunnel scripts", () => {
     assert.include(launch, "if ! ensure_remote_node_path; then");
     assert.include(devLaunch, `T3_NODE_ENGINE_RANGE='${TEST_NODE_ENGINE_RANGE}'`);
     assert.include(devLaunch, "does not satisfy required range ");
-    assert.include(launch, 'kill "$REMOTE_PID" 2>/dev/null || true');
+    assert.include(launch, 'stop_process "$REMOTE_PID"');
     assert.include(launch, "wait_ready");
     assert.include(launch, '"$RUNNER_FILE" serve --host 127.0.0.1');
     assert.include(launch, '--base-dir "$DEFAULT_SERVER_HOME"');
@@ -283,12 +323,10 @@ describe("ssh tunnel scripts", () => {
     );
     assert.include(
       SshTunnel.buildRemoteStopScript(stateKey),
-      'if [ "$REMOTE_MANAGED" != "external" ] && [ -n "$REMOTE_PID" ]',
+      'if [ "$REMOTE_MANAGED" != "external" ] && process_alive "$REMOTE_PID"; then',
     );
-    assert.include(
-      SshTunnel.buildRemoteStopScript(stateKey),
-      'kill "$REMOTE_PID" 2>/dev/null || true',
-    );
+    assert.include(SshTunnel.buildRemoteStopScript(stateKey), 'stop_process "$REMOTE_PID"');
+    assert.include(SshTunnel.buildRemoteStopScript(stateKey), 'kill "$1" 2>/dev/null || true');
     assert.include(
       SshTunnel.buildRemoteStopScript(stateKey),
       'rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"',

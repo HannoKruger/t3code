@@ -34,6 +34,7 @@ import {
   type UsagePauseAction,
   type UsagePauseRecord,
   type UsagePauseThread,
+  USAGE_PAUSE_GRACE_MS,
 } from "./UsagePausePolicy.ts";
 
 /**
@@ -54,8 +55,9 @@ export class UsagePauseReactor extends Context.Service<
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 
 const WRAP_UP_INSTRUCTIONS =
-  "Stop now: do not start new work, tools or subagents, and stop every subagent and background task that is still running. " +
-  "Reply with a short note of where you are and what is left, then end your turn.";
+  "Stop all work now. Do not start new work, tools or subagents, and stop every subagent and background task you started. " +
+  "This thread resumes automatically after the limit resets, so reply with a short note of where you are and what is left, then end your turn. " +
+  `Anything still running in ${USAGE_PAUSE_GRACE_MS / 60_000} minutes is stopped.`;
 const RESUME_MESSAGE =
   "The Claude usage limit has reset. Continue from where you paused, using your note above.";
 

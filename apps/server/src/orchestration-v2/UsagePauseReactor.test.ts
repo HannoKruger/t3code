@@ -267,7 +267,7 @@ describe("UsagePauseReactor", () => {
         threads: [makeThread()],
         providers: claude(95),
         messages: [{ messageId: PAUSE_ID, createdAt: "2026-10-14T09:50:00.000Z" }],
-        thenWait: "2 minutes",
+        thenWait: "4 minutes",
       });
       const [interrupt] = commands;
       assert(interrupt?.type === "run.interrupt");

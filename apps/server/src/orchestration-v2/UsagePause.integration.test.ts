@@ -198,9 +198,13 @@ it.effect("pauses a running Claude thread at the limit and resumes it after the 
         assert.equal(paused.runs.length, 1, "the pause steers the running turn");
         assert.equal(offers.length, 2);
         assert.include(offerText(offers[1]!), "Paused: Claude 5-hour usage is at 92%");
+        assert.include(offerText(offers[1]!), "Anything still running in 5 minutes is stopped.");
         assert.equal(offers[1]!.priority, "now");
 
-        yield* TestClock.adjust(Duration.minutes(3));
+        yield* TestClock.adjust(Duration.minutes(4));
+        yield* settle;
+        assert.equal(interrupts, 0, "the agent gets five minutes to wrap up");
+        yield* TestClock.adjust(Duration.minutes(1));
         yield* settle;
         assert.equal(interrupts, 1, "a run still working after the grace period is interrupted");
         const stopped = yield* orchestrator.getThreadProjection(threadId);

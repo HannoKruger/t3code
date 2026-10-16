@@ -2,7 +2,7 @@ import type { RunId, ServerProviderUsageWindow, ThreadId } from "@t3tools/contra
 import * as DateTime from "effect/DateTime";
 
 /** How long a paused agent gets to write its note and end the run before it is interrupted. */
-export const USAGE_PAUSE_GRACE_MS = 3 * 60 * 1_000;
+export const USAGE_PAUSE_GRACE_MS = 5 * 60 * 1_000;
 /** Resume a little after the reset so the provider has reported the fresh window. */
 export const USAGE_PAUSE_RESUME_DELAY_MS = 2 * 60 * 1_000;
 const USAGE_PAUSE_MESSAGE_PREFIX = "usage-pause:";

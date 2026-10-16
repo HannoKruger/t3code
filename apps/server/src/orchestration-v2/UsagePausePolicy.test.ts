@@ -149,12 +149,12 @@ describe("planUsagePauseAction", () => {
   });
 
   it("gives a paused thread a grace period to wrap up before stopping it", () => {
-    const thread = makeThread({ latestPause: makePause({ createdAt: at(-minutes(2)) }) });
+    const thread = makeThread({ latestPause: makePause({ createdAt: at(-minutes(4)) }) });
     expect(planUsagePauseAction(thread, NOW_MS)).toBeNull();
   });
 
   it("stops the run of a paused thread that still works after the grace period", () => {
-    const pause = makePause({ createdAt: at(-minutes(3)) });
+    const pause = makePause({ createdAt: at(-minutes(5)) });
     expect(planUsagePauseAction(makeThread({ latestPause: pause }), NOW_MS)).toEqual({
       type: "interrupt",
       threadId: THREAD_ID,
@@ -214,7 +214,7 @@ describe("planUsagePauseAction", () => {
 describe("nextUsagePauseDeadline", () => {
   it("wakes at the end of the grace period for a paused thread that still works", () => {
     const pause = makePause({ createdAt: at(-minutes(1)) });
-    expect(nextUsagePauseDeadline(makeThread({ latestPause: pause }))).toBe(NOW_MS + minutes(2));
+    expect(nextUsagePauseDeadline(makeThread({ latestPause: pause }))).toBe(NOW_MS + minutes(4));
   });
 
   it("wakes at the resume time for a paused thread that has stopped", () => {

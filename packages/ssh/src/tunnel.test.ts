@@ -204,6 +204,51 @@ describe("ssh tunnel scripts", () => {
     assert.include(powershell, "T3CODE_NO_BROWSER=1");
   });
 
+  it("updates or refuses an older server before joining it", () => {
+    const launch = SshTunnel.buildRemoteLaunchScript(ARCHIVE);
+
+    assert.include(launch, "REMOTE_APP_VERSION='1.2.3-preview.20260911.4'");
+    assert.include(launch, '"$RUNNER_FILE" update "$REMOTE_APP_VERSION" --yes');
+    assert.include(launch, 'grep -q \'"serviceManaged":true\' "$DEFAULT_RUNTIME_FILE"');
+    assert.include(launch, "which is older than this app (%s)");
+    // A source checkout has no release version to compare against.
+    assert.include(SshTunnel.buildRemoteLaunchScript(NODE_SCRIPT), "REMOTE_APP_VERSION=''");
+  });
+
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "orders versions the way the older-server check needs",
+    () =>
+      Effect.gen(function* () {
+        const launch = SshTunnel.buildRemoteLaunchScript(ARCHIVE);
+        const start = launch.indexOf("version_older() {");
+        const versionOlder = launch.slice(start, launch.indexOf("\n}\n", start) + 3);
+        const cases: ReadonlyArray<readonly [string, string, boolean]> = [
+          ["0", "0.1.0-hanno.5", true],
+          ["0.0.45", "0.1.0-hanno.5", true],
+          ["0.1.0", "0.1.0-hanno.5", true],
+          ["0.1.0-hanno.4", "0.1.0-hanno.5", true],
+          ["0.1.0-hanno.10", "0.1.0-hanno.5", false],
+          ["0.1.0-hanno.5", "0.1.0-hanno.5", false],
+          ["0.1.1", "0.1.0-hanno.5", false],
+        ];
+        const script = [
+          versionOlder,
+          ...cases.map(
+            ([server, app]) =>
+              `if version_older '${server}' '${app}'; then echo older; else echo not-older; fi`,
+          ),
+        ].join("\n");
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const child = yield* spawner.spawn(ChildProcess.make("sh", ["-c", script]));
+        const output = yield* child.stdout.pipe(Stream.decodeText(), Stream.mkString);
+        assert.equal(Number(yield* child.exitCode), 0);
+        assert.deepEqual(
+          output.trim().split("\n"),
+          cases.map(([, , older]) => (older ? "older" : "not-older")),
+        );
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it("rejects archive versions that are not a single exact version segment", () => {
     for (const archiveVersion of [
       "../other",

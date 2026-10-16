@@ -734,6 +734,47 @@ if [ -n "$DEFAULT_RUNTIME_INFO" ]; then
   DEFAULT_RUNTIME_PID="\${DEFAULT_RUNTIME_INFO%% *}"
   DEFAULT_REMOTE_PORT="\${DEFAULT_RUNTIME_INFO#* }"
 fi
+# A client cannot talk to an older server, and joining one only shows up as a
+# connection setup timeout. A background service is updated to this app's
+# version before it is joined; any other older server, such as another desktop
+# app's built-in one, is reported instead. Servers from before 0.1.0 publish
+# no version and count as older.
+REMOTE_APP_VERSION=@@T3_ARCHIVE_VERSION@@
+default_runtime_version() {
+  DEFAULT_RUNTIME_VERSION="$(sed -n 's/.*"serverVersion":"\\([^"]*\\)".*/\\1/p' "$DEFAULT_RUNTIME_FILE" 2>/dev/null | head -n 1)"
+  printf '%s\\n' "\${DEFAULT_RUNTIME_VERSION:-0}"
+}
+version_older() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "$1" "$2" | sort -V 2>/dev/null | head -n 1)" = "$1" ]
+}
+default_runtime_is_older() {
+  version_older "$(default_runtime_version)" "$REMOTE_APP_VERSION"
+}
+if [ "$T3_ARCHIVE_MODE" = "1" ] && [ -n "$DEFAULT_RUNTIME_PID" ] \\
+  && { [ "$REMOTE_MANAGED" != "managed" ] || [ "$DEFAULT_RUNTIME_PID" != "$REMOTE_PID" ]; } \\
+  && default_runtime_is_older; then
+  OLDER_VERSION="$(default_runtime_version)"
+  [ "$OLDER_VERSION" = "0" ] && OLDER_VERSION="a version before 0.1.0"
+  if grep -q '"serviceManaged":true' "$DEFAULT_RUNTIME_FILE" 2>/dev/null; then
+    printf 'Updating the T3 background service from %s to %s.\\n' "$OLDER_VERSION" "$REMOTE_APP_VERSION" >>"$LOG_FILE"
+    "$RUNNER_FILE" update "$REMOTE_APP_VERSION" --yes </dev/null >>"$LOG_FILE" 2>&1 || true
+    UPDATE_WAITED=0
+    while default_runtime_is_older && [ "$UPDATE_WAITED" -lt 120 ]; do
+      sleep 1
+      UPDATE_WAITED=$((UPDATE_WAITED + 1))
+    done
+    if default_runtime_is_older; then
+      printf 'The T3 background service on this host runs %s and could not be updated to %s. Its log is %s.\\n' "$OLDER_VERSION" "$REMOTE_APP_VERSION" "$LOG_FILE" >&2
+      exit 1
+    fi
+    DEFAULT_RUNTIME_INFO="$(resolve_default_runtime_port 2>/dev/null || true)"
+    DEFAULT_RUNTIME_PID="\${DEFAULT_RUNTIME_INFO%% *}"
+    DEFAULT_REMOTE_PORT="\${DEFAULT_RUNTIME_INFO#* }"
+  else
+    printf 'This host already runs T3 Code %s (PID %s, port %s), which is older than this app (%s). Update or quit the T3 Code app on this host, then retry.\\n' "$OLDER_VERSION" "$DEFAULT_RUNTIME_PID" "$DEFAULT_REMOTE_PORT" "$REMOTE_APP_VERSION" >&2
+    exit 1
+  fi
+fi
 # The managed server runs on the default home, so it writes the default
 # runtime file too. When that file names the PID this launcher recorded as
 # managed, it describes our own server and its real port, not one to adopt.
@@ -946,6 +987,7 @@ export function buildRemoteNodeEnvScript(input?: RemoteT3RunnerOptions): string 
 export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
     T3_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
+    T3_ARCHIVE_VERSION: shellSingleQuote(input?.archiveVersion?.trim() ?? ""),
     T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
     T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
     T3_PICK_PORT_SCRIPT: stripTrailingNewlines(REMOTE_PICK_PORT_SCRIPT),

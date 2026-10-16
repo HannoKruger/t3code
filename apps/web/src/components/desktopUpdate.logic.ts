@@ -71,6 +71,13 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
 }
 
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
+  if (
+    state.notAppliedVersion !== undefined &&
+    (state.status === "available" || state.status === "downloaded") &&
+    getDesktopUpdateDownloadedVersion(state) === state.notAppliedVersion
+  ) {
+    return `Update ${state.notAppliedVersion} did not apply. Click to retry.`;
+  }
   if (state.status === "available") {
     return `Update ${state.availableVersion ?? "available"} ready to download`;
   }
@@ -101,7 +108,7 @@ export function getDesktopUpdateInstallConfirmationMessage(
   state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
 ): string {
   const version = state.downloadedVersion ?? state.availableVersion;
-  return `Install update${version ? ` ${version}` : ""} and restart T3 Code?\n\nConnected servers on an older version update to it first, and their running threads continue after they restart. Any running tasks in this app will be interrupted. Make sure you're ready before continuing.`;
+  return `Install update${version ? ` ${version}` : ""} and restart T3 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`;
 }
 
 export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {

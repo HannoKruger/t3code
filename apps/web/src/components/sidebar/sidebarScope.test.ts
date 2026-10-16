@@ -2,15 +2,22 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
+  ThreadId,
   type ScopedProjectRef,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
+import { derivePhysicalProjectKey } from "../../logicalProject";
 import {
+  buildSidebarProjectSnapshots,
+  type SidebarProjectSnapshot,
+} from "../../sidebarProjectGrouping";
+import {
+  filterSidebarScopeThreads,
   resolveSidebarScope,
   sidebarScopeIncludes,
   sidebarScopeProjectKeys,
+  sidebarScopeSearchEnvironmentIds,
   type SidebarScopeFilter,
 } from "./sidebarScope";
 
@@ -59,13 +66,18 @@ const deskOnly = makeGroup("desk:/srv/tools", [
   { environmentId: desk, projectId: ProjectId.make("tools") },
 ]);
 const groups = [shared, deskOnly];
+const groupingSettings = {
+  sidebarProjectGroupingMode: "repository" as const,
+  sidebarProjectGroupingOverrides: {},
+};
 const resolve = (overrides: Partial<Parameters<typeof resolveSidebarScope>[0]>) =>
   resolveSidebarScope({
     environmentScopeId: null,
     projectScopeKey: null,
     environmentItems: items,
     projectGroups: groups,
-    snapshotsReady: true,
+    settings: groupingSettings,
+    canClearMissingScope: true,
     ...overrides,
   });
 
@@ -91,46 +103,88 @@ describe("resolveSidebarScope", () => {
     expect(regrouped.key).toBe(scope.key);
   });
 
-  it("reads a stored environment that is no longer a choice as all environments, stale only once snapshots are ready", () => {
-    const pending = resolve({ environmentScopeId: retired, snapshotsReady: false });
+  it("reads a stored environment that is no longer a choice as all environments, cleared only once absence is proven", () => {
+    const pending = resolve({ environmentScopeId: retired, canClearMissingScope: false });
 
     expect(pending.environment).toBeNull();
     expect(pending.projectGroups).toBe(groups);
     expect(
-      pending.stale.environment,
+      pending.stored.environmentScopeId,
       "clearing before proof would wipe a scope mid cold start",
-    ).toBe(false);
-    expect(resolve({ environmentScopeId: retired }).stale.environment).toBe(true);
+    ).toBe(retired);
+    expect(resolve({ environmentScopeId: retired }).stored.environmentScopeId).toBeNull();
   });
 
-  it("never keeps an active scope behind a hidden control: no items means null and stale", () => {
+  it("never keeps an active scope behind a hidden control: no items means null and cleared", () => {
     const scope = resolve({ environmentScopeId: laptop, environmentItems: [] });
 
     expect(scope.environment).toBeNull();
-    expect(scope.stale.environment).toBe(true);
+    expect(scope.stored.environmentScopeId).toBeNull();
+  });
+
+  it("keeps both stored values while both still resolve", () => {
+    expect(
+      resolve({ environmentScopeId: desk, projectScopeKey: deskOnly.projectKey }).stored,
+    ).toEqual({ environmentScopeId: desk, projectScopeKey: deskOnly.projectKey });
   });
 
   it("keeps a project scope alive when its environment scope dies", () => {
     const scope = resolve({ environmentScopeId: retired, projectScopeKey: deskOnly.projectKey });
 
     expect(scope.projectGroup).toBe(deskOnly);
-    expect(scope.stale.project).toBe(false);
+    expect(scope.stored.projectScopeKey).toBe(deskOnly.projectKey);
   });
 
   it("drops a project group with no member on the scoped environment, behind the same readiness gate", () => {
     const pending = resolve({
       environmentScopeId: laptop,
       projectScopeKey: deskOnly.projectKey,
-      snapshotsReady: false,
+      canClearMissingScope: false,
     });
 
     expect(pending.projectGroup).toBeNull();
-    expect(pending.stale.project, "the scoped machine's snapshot may not have arrived yet").toBe(
-      false,
-    );
     expect(
-      resolve({ environmentScopeId: laptop, projectScopeKey: deskOnly.projectKey }).stale.project,
-    ).toBe(true);
+      pending.stored.projectScopeKey,
+      "the scoped machine's snapshot may not have arrived yet",
+    ).toBe(deskOnly.projectKey);
+    expect(
+      resolve({ environmentScopeId: laptop, projectScopeKey: deskOnly.projectKey }).stored
+        .projectScopeKey,
+    ).toBeNull();
+  });
+
+  it("migrates a physical scratch scope to its group within the scoped environment", () => {
+    const scratchProject = (environmentId: EnvironmentId, workspaceRoot: string) => ({
+      id: ProjectId.make(`scratch-${environmentId}`),
+      environmentId,
+      title: "No project",
+      workspaceRoot,
+      repositoryIdentity: null,
+      defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      createdAt: "2026-03-09T10:00:00.000Z",
+      updatedAt: "2026-03-09T10:00:00.000Z",
+      scripts: [],
+      isScratch: true as const,
+    });
+    const deskScratch = scratchProject(desk, "/desk/scratch");
+    const scratchGroups = buildSidebarProjectSnapshots({
+      projects: [scratchProject(laptop, "/laptop/scratch"), deskScratch],
+      groupScratchProjects: true,
+      settings: groupingSettings,
+      primaryEnvironmentId: laptop,
+      resolveEnvironmentLabel: (environmentId) => environmentId,
+    });
+    const scope = resolve({
+      environmentScopeId: desk,
+      projectScopeKey: derivePhysicalProjectKey(deskScratch),
+      projectGroups: scratchGroups,
+      canClearMissingScope: false,
+    });
+
+    expect(scope.projectGroup).toBe(scratchGroups[0]);
+    expect(scope.stored.projectScopeKey, "migration needs no proof of absence").toBe(
+      scratchGroups[0]!.projectKey,
+    );
   });
 
   it("keys on effective values so a dropped stored key does not reset paging or selection", () => {
@@ -143,12 +197,9 @@ describe("resolveSidebarScope", () => {
 
   it("never keys an environment whose id is a sentinel word the same as no scope", () => {
     const all = EnvironmentId.make("all");
-    const scoped = resolveSidebarScope({
+    const scoped = resolve({
       environmentScopeId: all,
-      projectScopeKey: null,
       environmentItems: [...items, option(all)],
-      projectGroups: groups,
-      snapshotsReady: true,
     });
     expect(scoped.environment?.environmentId).toBe(all);
     expect(scoped.key).not.toBe(resolve({}).key);
@@ -196,5 +247,63 @@ describe("sidebarScopeIncludes", () => {
 
   it("requires both axes when both are set", () => {
     expect(admitted({ environmentId: laptop, projectKeys: appKeys })).toEqual([onLaptop]);
+  });
+});
+
+type SidebarRosterThread = Parameters<typeof filterSidebarScopeThreads>[0][number];
+
+describe("filterSidebarScopeThreads", () => {
+  const thread = (
+    id: string,
+    ref: ScopedProjectRef,
+    overrides: { archivedAt?: string; subagent?: boolean } = {},
+  ): SidebarRosterThread & { readonly id: string } => ({
+    id,
+    ...ref,
+    archivedAt: overrides.archivedAt ?? null,
+    lineage: {
+      rootThreadId: ThreadId.make(id),
+      parentThreadId: overrides.subagent ? ThreadId.make("parent") : null,
+      relationshipToParent: overrides.subagent ? "subagent" : null,
+    },
+  });
+  const app = (environmentId: EnvironmentId) => ({
+    environmentId,
+    projectId: ProjectId.make("app"),
+  });
+  const threads = [
+    thread("laptop-root", app(laptop)),
+    thread("desk-root", app(desk)),
+    thread("laptop-archived", app(laptop), { archivedAt: "2026-03-09T10:00:00.000Z" }),
+    thread("laptop-subagent", app(laptop), { subagent: true }),
+  ];
+  const visibleIds = (filter: SidebarScopeFilter) =>
+    filterSidebarScopeThreads(threads, filter).map((visible) => visible.id);
+
+  it("keeps the roster rule that hides archived and subagent threads when nothing is scoped", () => {
+    expect(visibleIds({ environmentId: null, projectKeys: null })).toEqual([
+      "laptop-root",
+      "desk-root",
+    ]);
+  });
+
+  it("narrows the roster to the scoped environment on top of the project scope", () => {
+    expect(visibleIds({ environmentId: laptop, projectKeys: null })).toEqual(["laptop-root"]);
+    expect(
+      visibleIds({ environmentId: desk, projectKeys: new Set(["laptop:app", "desk:app"]) }),
+    ).toEqual(["desk-root"]);
+  });
+});
+
+describe("sidebarScopeSearchEnvironmentIds", () => {
+  const connected = [laptop, desk];
+
+  it("hands back the connected list itself when unscoped, so the search key stays stable", () => {
+    expect(sidebarScopeSearchEnvironmentIds(connected, null)).toBe(connected);
+  });
+
+  it("fans out only to the scoped environment, and nowhere while it is disconnected", () => {
+    expect(sidebarScopeSearchEnvironmentIds(connected, desk)).toEqual([desk]);
+    expect(sidebarScopeSearchEnvironmentIds(connected, retired)).toEqual([]);
   });
 });

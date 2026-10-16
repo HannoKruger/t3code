@@ -1,42 +1,28 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  USAGE_PAUSE_ACTIVITY_KIND,
   describeUsagePause,
   formatUsagePauseTime,
-  readUsagePausePayload,
-  usagePauseActivityLabel,
+  localizeUsagePauseMessage,
 } from "./usagePause.ts";
 
-const payload = {
+const pause = {
   windowId: "five_hour",
   label: "Session",
   usedPercent: 90.4,
-  resetsAt: "2026-10-14T12:00:00.000Z",
   resumeAt: "2026-10-14T12:02:00.000Z",
 };
 
-describe("readUsagePausePayload", () => {
-  it("reads a stored pause", () => {
-    expect(readUsagePausePayload(payload)).toEqual(payload);
-  });
-
-  it("rejects payloads from other activities", () => {
-    expect(readUsagePausePayload({ message: "hello" })).toBeNull();
-    expect(readUsagePausePayload(null)).toBeNull();
-  });
-});
-
 describe("describeUsagePause", () => {
   it("names the window and when work resumes", () => {
-    expect(describeUsagePause(payload, () => "12:02")).toBe(
+    expect(describeUsagePause(pause, () => "12:02")).toBe(
       "Paused: Claude 5-hour usage is at 90%. Resumes automatically 12:02.",
     );
   });
 
   it("names the weekly window", () => {
     expect(
-      describeUsagePause({ ...payload, windowId: "seven_day", label: "Weekly" }, () => "x"),
+      describeUsagePause({ ...pause, windowId: "seven_day", label: "Weekly" }, () => "x"),
     ).toBe("Paused: Claude weekly usage is at 90%. Resumes automatically x.");
   });
 });
@@ -52,14 +38,18 @@ describe("formatUsagePauseTime", () => {
   });
 });
 
-describe("usagePauseActivityLabel", () => {
-  it("relabels a pause in the viewer's time zone", () => {
-    expect(usagePauseActivityLabel(USAGE_PAUSE_ACTIVITY_KIND, payload)).toBe(
-      `Paused: Claude 5-hour usage is at 90%. Resumes automatically ${formatUsagePauseTime(payload.resumeAt)}.`,
+describe("localizeUsagePauseMessage", () => {
+  const text = `${describeUsagePause(pause, (instant) => instant)}\n\nStop now.`;
+
+  it("shows a pause message's resume time in the viewer's zone", () => {
+    expect(
+      localizeUsagePauseMessage("usage-pause:t:five_hour:2026-10-14T12:00:00.000Z", text),
+    ).toBe(
+      `Paused: Claude 5-hour usage is at 90%. Resumes automatically ${formatUsagePauseTime(pause.resumeAt)}.\n\nStop now.`,
     );
   });
 
-  it("leaves other activities alone", () => {
-    expect(usagePauseActivityLabel("runtime.warning", payload)).toBeNull();
+  it("leaves every other message alone", () => {
+    expect(localizeUsagePauseMessage("message-1", text)).toBe(text);
   });
 });

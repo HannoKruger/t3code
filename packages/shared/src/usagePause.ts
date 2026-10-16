@@ -1,46 +1,29 @@
 // @effect-diagnostics globalDate:off -- Formats an instant for display in the viewer's zone via Intl.
 /**
- * The chat line a thread shows while it is paused near a Claude usage limit.
+ * The chat line a thread shows when it is paused near a Claude usage limit.
  *
- * The server stores the pause as a thread activity of `USAGE_PAUSE_ACTIVITY_KIND`
- * with a `UsagePausePayload`. Clients rebuild the label from the payload so the
- * resume time renders in the viewer's own time zone; the stored summary is the
- * fallback for surfaces that only show it.
+ * The server sends it as the wrap-up message with an id starting `usage-pause:` and the resume
+ * time in UTC. Clients show that time in the viewer's own zone instead.
  */
-export const USAGE_PAUSE_ACTIVITY_KIND = "usage-pause.paused";
+const USAGE_PAUSE_MESSAGE_PREFIX = "usage-pause:";
+const ISO_INSTANT = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/;
 
-export interface UsagePausePayload {
+export interface UsagePauseDescription {
   readonly windowId: string;
   readonly label: string;
   readonly usedPercent: number;
-  readonly resetsAt: string;
   readonly resumeAt: string;
 }
 
-export function readUsagePausePayload(payload: unknown): UsagePausePayload | null {
-  if (payload === null || typeof payload !== "object") return null;
-  const { windowId, label, usedPercent, resetsAt, resumeAt } = payload as Record<string, unknown>;
-  if (
-    typeof windowId !== "string" ||
-    typeof label !== "string" ||
-    typeof usedPercent !== "number" ||
-    typeof resetsAt !== "string" ||
-    typeof resumeAt !== "string"
-  ) {
-    return null;
-  }
-  return { windowId, label, usedPercent, resetsAt, resumeAt };
-}
-
-export function usagePauseWindowName(payload: UsagePausePayload): string {
-  return payload.windowId === "five_hour" ? "5-hour" : payload.label.toLowerCase();
+function windowName(pause: UsagePauseDescription): string {
+  return pause.windowId === "five_hour" ? "5-hour" : pause.label.toLowerCase();
 }
 
 export function describeUsagePause(
-  payload: UsagePausePayload,
+  pause: UsagePauseDescription,
   formatTime: (instant: string) => string,
 ): string {
-  return `Paused: Claude ${usagePauseWindowName(payload)} usage is at ${Math.round(payload.usedPercent)}%. Resumes automatically ${formatTime(payload.resumeAt)}.`;
+  return `Paused: Claude ${windowName(pause)} usage is at ${Math.round(pause.usedPercent)}%. Resumes automatically ${formatTime(pause.resumeAt)}.`;
 }
 
 /** `2026-10-14T12:02:00Z` to `Wed, Oct 14, 2:02 PM GMT+2`, in the viewer's zone by default. */
@@ -58,11 +41,8 @@ export function formatUsagePauseTime(instant: string, timeZone?: string): string
   }).format(date);
 }
 
-/** The label clients show for a pause activity, or null for any other activity. */
-export function usagePauseActivityLabel(kind: string, payload: unknown): string | null {
-  if (kind !== USAGE_PAUSE_ACTIVITY_KIND) return null;
-  const pause = readUsagePausePayload(payload);
-  return pause === null
-    ? null
-    : describeUsagePause(pause, (instant) => formatUsagePauseTime(instant));
+/** A pause message as the viewer should read it; every other message is returned unchanged. */
+export function localizeUsagePauseMessage(messageId: string, text: string): string {
+  if (!messageId.startsWith(USAGE_PAUSE_MESSAGE_PREFIX)) return text;
+  return text.replace(ISO_INSTANT, (instant) => formatUsagePauseTime(instant));
 }

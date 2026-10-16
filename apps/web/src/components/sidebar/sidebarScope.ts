@@ -1,8 +1,13 @@
 import { scopedProjectKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
 
-import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
+import type { ProjectGroupingSettings } from "../../logicalProject";
+import {
+  resolveSidebarProjectScopeKey,
+  type SidebarProjectSnapshot,
+} from "../../sidebarProjectGrouping";
 import type { EnvironmentScopeOption } from "../../state/environments";
+import { filterSidebarV2VisibleThreads } from "../Sidebar.logic";
 
 export interface SidebarScope {
   /** Effective environment; null is every environment. A stored id that is not a current choice reads as null at once. */
@@ -13,8 +18,11 @@ export interface SidebarScope {
   readonly projectGroup: SidebarProjectSnapshot | null;
   /** Effective axes only, for consumers that reset when the scope flips. */
   readonly key: string;
-  /** Stored values proven absent. Never true before every enabled environment has a live project snapshot. */
-  readonly stale: { readonly environment: boolean; readonly project: boolean };
+  /** What storage should hold: a migrated scratch key, or null once absence is proven. */
+  readonly stored: {
+    readonly environmentScopeId: EnvironmentId | null;
+    readonly projectScopeKey: string | null;
+  };
 }
 
 /**
@@ -22,16 +30,17 @@ export interface SidebarScope {
  * show. The project key is a logical group key that spans machines by design,
  * so the axes are independent in storage and narrow each other only here: the
  * group is looked up in the list already narrowed to the environment, so
- * "not on this environment" and "gone" are one rule. Absence is only marked
- * stale once `snapshotsReady`, because a cached or disconnected environment
- * cannot prove that anything is gone.
+ * "not on this environment" and "gone" are one rule. Absence only clears
+ * storage once `canClearMissingScope`, because a cached or disconnected
+ * environment cannot prove that anything is gone.
  */
 export function resolveSidebarScope(input: {
   readonly environmentScopeId: EnvironmentId | null;
   readonly projectScopeKey: string | null;
   readonly environmentItems: readonly EnvironmentScopeOption[];
   readonly projectGroups: readonly SidebarProjectSnapshot[];
-  readonly snapshotsReady: boolean;
+  readonly settings: ProjectGroupingSettings;
+  readonly canClearMissingScope: boolean;
 }): SidebarScope {
   const environment =
     input.environmentScopeId === null
@@ -46,19 +55,25 @@ export function resolveSidebarScope(input: {
             (projectRef) => projectRef.environmentId === environment.environmentId,
           ),
         );
+  const projectKey = resolveSidebarProjectScopeKey({
+    groups: projectGroups,
+    key: input.projectScopeKey,
+    settings: input.settings,
+  });
   const projectGroup =
-    input.projectScopeKey === null
+    projectKey === null
       ? null
-      : (projectGroups.find((group) => group.projectKey === input.projectScopeKey) ?? null);
+      : (projectGroups.find((group) => group.projectKey === projectKey) ?? null);
+  const keepUnlessProvenGone = <T>(stored: T) => (input.canClearMissingScope ? null : stored);
   return {
     environment,
     projectGroups,
     projectGroup,
     key: JSON.stringify([environment?.environmentId ?? null, projectGroup?.projectKey ?? null]),
-    stale: {
-      environment:
-        input.environmentScopeId !== null && input.snapshotsReady && environment === null,
-      project: input.projectScopeKey !== null && input.snapshotsReady && projectGroup === null,
+    stored: {
+      environmentScopeId:
+        environment?.environmentId ?? keepUnlessProvenGone(input.environmentScopeId),
+      projectScopeKey: projectGroup?.projectKey ?? keepUnlessProvenGone(input.projectScopeKey),
     },
   };
 }
@@ -81,10 +96,38 @@ export interface SidebarScopeFilter {
   readonly projectKeys: ReadonlySet<string> | null;
 }
 
-/** The one visibility test threads, draft rows and the draft count share. */
+/** The one visibility test draft rows and the draft count share with the thread roster. */
 export function sidebarScopeIncludes(filter: SidebarScopeFilter, ref: ScopedProjectRef): boolean {
   return (
     (filter.environmentId === null || ref.environmentId === filter.environmentId) &&
     (filter.projectKeys === null || filter.projectKeys.has(scopedProjectKey(ref)))
   );
+}
+
+type SidebarRosterThread = Parameters<typeof filterSidebarV2VisibleThreads>[0][number];
+
+/** Roster threads: the Sidebar V2 visibility rule, narrowed to the scoped environment. */
+export function filterSidebarScopeThreads<T extends SidebarRosterThread>(
+  threads: readonly T[],
+  filter: SidebarScopeFilter,
+): T[] {
+  const visible = filterSidebarV2VisibleThreads(threads, filter.projectKeys);
+  return filter.environmentId === null
+    ? visible
+    : visible.filter((thread) => thread.environmentId === filter.environmentId);
+}
+
+/**
+ * Connected environments the server-side content search fans out to. Scoped
+ * to one environment, only that one (or none while it is disconnected), instead
+ * of fetching matches from every machine and discarding them. Unscoped, the
+ * input array is handed back so the search query key stays stable.
+ */
+export function sidebarScopeSearchEnvironmentIds(
+  connectedEnvironmentIds: readonly EnvironmentId[],
+  scopedEnvironmentId: EnvironmentId | null,
+): readonly EnvironmentId[] {
+  return scopedEnvironmentId === null
+    ? connectedEnvironmentIds
+    : connectedEnvironmentIds.filter((environmentId) => environmentId === scopedEnvironmentId);
 }

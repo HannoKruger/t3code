@@ -34,7 +34,6 @@ import {
   type UsagePauseAction,
   type UsagePauseRecord,
   type UsagePauseThread,
-  USAGE_PAUSE_GRACE_MS,
 } from "./UsagePausePolicy.ts";
 
 /**
@@ -54,12 +53,10 @@ export class UsagePauseReactor extends Context.Service<
 
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 
-const WRAP_UP_INSTRUCTIONS =
-  "Stop all work now. Do not start new work, tools or subagents, and stop every subagent and background task you started. " +
-  "This thread resumes automatically after the limit resets, so reply with a short note of where you are and what is left, then end your turn. " +
-  `Anything still running in ${USAGE_PAUSE_GRACE_MS / 60_000} minutes is stopped.`;
+const STOP_INSTRUCTIONS =
+  "Stop all work now, including every subagent and background task, and end your turn.";
 const RESUME_MESSAGE =
-  "The Claude usage limit has reset. Continue from where you paused, using your note above.";
+  "Continue where you left off, and restart any subagents or background tasks you stopped.";
 
 interface RecordedPause extends UsagePauseRecord {
   readonly threadId: ThreadId;
@@ -153,7 +150,7 @@ export const make = Effect.gen(function* () {
           commandId: CommandId.make(`server:${messageId}`),
           threadId: thread.id,
           messageId: MessageId.make(messageId),
-          text: `${notice}\n\n${WRAP_UP_INSTRUCTIONS}`,
+          text: `${notice}\n\n${STOP_INSTRUCTIONS}`,
           attachments: [],
           deliveryIntent: "steer",
           dispatchMode: { type: "start_immediately" },

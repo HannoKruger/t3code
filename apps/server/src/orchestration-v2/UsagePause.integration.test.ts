@@ -198,7 +198,7 @@ it.effect("pauses a running Claude thread at the limit and resumes it after the 
         assert.equal(paused.runs.length, 1, "the pause steers the running turn");
         assert.equal(offers.length, 2);
         assert.include(offerText(offers[1]!), "Paused: Claude 5-hour usage is at 92%");
-        assert.include(offerText(offers[1]!), "Anything still running in 5 minutes is stopped.");
+        assert.include(offerText(offers[1]!), "Stop all work now");
         assert.equal(offers[1]!.priority, "now");
 
         yield* TestClock.adjust(Duration.minutes(4));
@@ -217,7 +217,7 @@ it.effect("pauses a running Claude thread at the limit and resumes it after the 
           resumed.messages.find((message) => message.id.startsWith("usage-resume:")),
         );
         assert.equal(resumed.runs.length, 2, "the resume starts a new run");
-        assert.include(offerText(offers.at(-1)!), "usage limit has reset");
+        assert.include(offerText(offers.at(-1)!), "Continue where you left off");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(

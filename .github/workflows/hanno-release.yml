@@ -66,10 +66,15 @@ jobs:
           set -euo pipefail
           git init --quiet .
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git fetch --quiet --no-tags --filter=blob:none origin "+refs/heads/hanno:refs/remotes/origin/hanno"
+          # A refspec could write its commit over origin/hanno and pass the check below.
+          if [[ ! "$BUILD_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+            echo "::error::Ref '$BUILD_REF' must be a commit or branch name." >&2
+            exit 1
+          fi
           # Fetched alone, because FETCH_HEAD names only the first ref of a fetch.
-          git fetch --quiet --no-tags --filter=blob:none origin "$BUILD_REF"
+          git fetch --quiet --no-tags --filter=blob:none origin -- "$BUILD_REF"
           sha="$(git rev-parse FETCH_HEAD)"
+          git fetch --quiet --no-tags --filter=blob:none origin "+refs/heads/hanno:refs/remotes/origin/hanno"
           if ! git merge-base --is-ancestor "$sha" origin/hanno; then
             echo "::error::$BUILD_REF ($sha) is not on hanno." >&2
             exit 1

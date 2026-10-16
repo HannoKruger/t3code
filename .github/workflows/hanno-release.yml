@@ -1,7 +1,8 @@
 # Builds this fork's macOS arm64 desktop app, signed with the fork's
-# self-signed certificate, its Windows x64 installer, unsigned, and its Linux x64
-# server archive, then publishes them as the newest GitHub release. The desktop app's updater and `t3 update` on
-# Linux servers both read this repository's releases.
+# self-signed certificate, its Windows x64 installer, unsigned, and its Linux x64,
+# Linux arm64 and macOS arm64 server archives, then publishes them as the newest
+# GitHub release. The desktop app's updater, `t3 update` on servers, and SSH
+# remotes all read this repository's releases.
 name: Hanno release
 
 on:
@@ -268,13 +269,42 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  server-linux-x64:
-    name: Build Linux x64 server
+  # SSH remotes download the archive matching their own platform, so every
+  # POSIX key in CLI_ARCHIVE_PLATFORM_KEYS needs one or those hosts get a 404.
+  # node-pty compiles from source on Linux, so arm64 builds on arm64 hardware.
+  server:
+    name: Build ${{ matrix.label }} server
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - label: Linux x64
+            runner: ubuntu-latest
+            platform: linux
+            arch: x64
+            platform_key: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
+          - label: Linux arm64
+            runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            platform_key: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu
+          - label: macOS arm64
+            runner: macos-latest
+            platform: mac
+            arch: arm64
+            platform_key: darwin-arm64
+            rust_target: aarch64-apple-darwin
     env:
       BUILD_SHA: ${{ needs.prepare.outputs.sha }}
+      PLATFORM: ${{ matrix.platform }}
+      ARCH: ${{ matrix.arch }}
+      PLATFORM_KEY: ${{ matrix.platform_key }}
+      RUST_TARGET: ${{ matrix.rust_target }}
       T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
       T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
       T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.CLERK_CLI_OAUTH_CLIENT_ID }}
@@ -305,7 +335,7 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-          targets: x86_64-unknown-linux-gnu
+          targets: ${{ matrix.rust_target }}
 
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "$VERSION"
@@ -323,15 +353,15 @@ jobs:
       - name: Build resource monitor
         run: |
           set -euo pipefail
-          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
-          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
-          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target "$RUST_TARGET"
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/$PLATFORM_KEY"
+          cp "native/resource-monitor/target/$RUST_TARGET/release/t3-resource-monitor" "$RUNNER_TEMP/cli-resource-monitor/$PLATFORM_KEY/"
 
       - name: Build server archive
         run: |
           node scripts/build-cli-archive.ts \
-            --platform linux \
-            --arch x64 \
+            --platform "$PLATFORM" \
+            --arch "$ARCH" \
             --version "$VERSION" \
             --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
             --output-dir release-cli
@@ -342,7 +372,7 @@ jobs:
       - name: Upload server archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: server-linux-x64
+          name: server-${{ matrix.platform_key }}
           path: release-cli/*
           if-no-files-found: error
           retention-days: 1
@@ -351,7 +381,7 @@ jobs:
   # its own platform's files.
   publish:
     name: Publish release
-    needs: [prepare, macos, windows, server-linux-x64]
+    needs: [prepare, macos, windows, server]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -380,5 +410,5 @@ jobs:
             -R "$GITHUB_REPOSITORY" \
             --target "$BUILD_SHA" \
             --title "T3 Code $VERSION" \
-            --notes "macOS arm64 and Windows x64 apps and the Linux x64 server of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
+            --notes "macOS arm64 and Windows x64 apps and the Linux x64, Linux arm64 and macOS arm64 servers of T3 Code ${VERSION%-hanno.*} with this fork's changes, built from $BUILD_SHA." \
             --latest

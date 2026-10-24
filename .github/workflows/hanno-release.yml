@@ -190,6 +190,7 @@ jobs:
   windows:
     name: Build Windows x64
     needs: prepare
+    if: github.ref == 'refs/heads/hanno'
     runs-on: [self-hosted, Windows, X64, hannespc, windows-release]
     environment: self-hosted-build
     timeout-minutes: 60
@@ -277,11 +278,14 @@ jobs:
   # POSIX key in CLI_ARCHIVE_PLATFORM_KEYS needs one or those hosts get a 404.
   # node-pty compiles from source on Linux, so arm64 builds on arm64 hardware,
   # which GitHub provides free for public repositories. Linux x64 and Windows x64
-  # build on hannespc. The self-hosted-build environment only allows the hanno
-  # branch, so a branch cannot point these runners at its own workflow copy.
+  # build on hannespc on just-in-time runners that run one job and are wiped.
+  # Runner labels cannot be restricted on a personal account, so these jobs only
+  # run on the hanno branch, and the self-hosted-build environment (hanno only)
+  # backs that up on GitHub's side.
   server:
     name: Build ${{ matrix.label }} server
     needs: prepare
+    if: github.ref == 'refs/heads/hanno'
     runs-on: ${{ fromJSON(matrix.runner) }}
     environment: ${{ matrix.environment }}
     timeout-minutes: 45

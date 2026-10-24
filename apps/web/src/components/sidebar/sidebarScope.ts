@@ -104,6 +104,22 @@ export function sidebarScopeIncludes(filter: SidebarScopeFilter, ref: ScopedProj
   );
 }
 
+/**
+ * The project keys a scope shows, for surfaces that filter by key alone, such
+ * as the draft rows. Null means the scope hides nothing.
+ */
+export function sidebarScopeMatchingProjectKeys(
+  projects: Iterable<ScopedProjectRef>,
+  filter: SidebarScopeFilter,
+): ReadonlySet<string> | null {
+  if (filter.environmentId === null && filter.projectKeys === null) return null;
+  const keys = new Set<string>();
+  for (const project of projects) {
+    if (sidebarScopeIncludes(filter, project)) keys.add(scopedProjectKey(project));
+  }
+  return keys;
+}
+
 type SidebarRosterThread = Parameters<typeof filterSidebarV2VisibleThreads>[0][number];
 
 /** Roster threads: the Sidebar V2 visibility rule, narrowed to the scoped environment. */

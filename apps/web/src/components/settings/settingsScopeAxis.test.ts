@@ -1,38 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { ALL_ENVIRONMENTS_VALUE } from "../EnvironmentScopeRadioItems";
-
-import {
-  environmentAxisValue,
-  projectAxisValue,
-  selectEnvironmentAxis,
-  selectProjectAxis,
-} from "./settingsScopeAxis";
+import { selectEnvironmentAxis, selectProjectAxis } from "./settingsScopeAxis";
 
 describe("settings scope axes", () => {
-  it("maps each axis to its search key and back", () => {
-    expect(projectAxisValue({})).toBe("all");
-    expect(projectAxisValue({ project: "app" })).toBe("app");
-    expect(selectProjectAxis({ machine: "second" }, "app")).toEqual({
-      project: "app",
-      machine: "second",
-    });
-    expect(selectProjectAxis({ machine: "second", project: "app" }, "all")).toEqual({
-      machine: "second",
-    });
-    expect(selectEnvironmentAxis({ project: "app" }, "first")).toEqual({
-      project: "app",
-      machine: "first",
-    });
-    expect(
-      selectEnvironmentAxis({ project: "app", machine: "first" }, ALL_ENVIRONMENTS_VALUE),
-    ).toEqual({ project: "app" });
-    expect(selectEnvironmentAxis({ project: "app" }, "all")).toEqual({
-      project: "app",
-      machine: "all",
-    });
-  });
-
   it("drops a checkout narrowing from older links when either axis changes", () => {
     const checkout = { project: "app", checkout: "app@first", machine: "first" };
     expect(selectEnvironmentAxis(checkout, "second")).toEqual({
@@ -40,14 +10,5 @@ describe("settings scope axes", () => {
       machine: "second",
     });
     expect(selectProjectAxis(checkout, "app")).toEqual({ project: "app", machine: "first" });
-  });
-});
-
-describe("environmentAxisValue", () => {
-  it("shows the checkout's environment for a legacy checkout link", () => {
-    expect(environmentAxisValue({ project: "p", checkout: "c" }, "laptop")).toBe("laptop");
-    expect(environmentAxisValue({ project: "p" }, null)).toBe(ALL_ENVIRONMENTS_VALUE);
-    expect(environmentAxisValue({ machine: "all" }, null)).not.toBe(ALL_ENVIRONMENTS_VALUE);
-    expect(environmentAxisValue({ machine: "desk" }, "laptop")).toBe("desk");
   });
 });

@@ -1,17 +1,3 @@
-/**
- * The sidebar header: one row holding search, environment scope, project
- * scope and new thread.
- *
- * Search owns the row's text and spans it. Both scopes collapse to icons that
- * sit with new-project and new-thread as a segmented group at the end, broader
- * axis first. Each scope icon swaps to the selected machine glyph or project
- * favicon, so the header still names the scope after the row that showed it
- * is gone.
- *
- * The scope pickers themselves are passed in: their state lives with the rest
- * of the sidebar's scope logic. `searchFieldRef` lands on the search field so
- * their popups can anchor to that width rather than to a 28px trigger.
- */
 import { FolderPlusIcon, SearchIcon, SquarePenIcon, XIcon } from "lucide-react";
 import {
   type ComponentProps,
@@ -27,21 +13,15 @@ import { SidebarInput, SidebarMenuButton } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 export interface SidebarThreadHeaderProps {
-  /** Lands on the search field so a popup can anchor to its width. */
   searchFieldRef?: RefObject<HTMLDivElement | null>;
-  /** Without projects there is nothing to scope by project, so those controls stay out. */
   hasProjects: boolean;
-  /** The environment scope menu, first in the group; null when there is nothing to choose. */
   environmentScope: ReactNode;
-  /** The project scope combobox, rendered after the environment scope. */
   projectScope: ReactNode;
   onNewProject: () => void;
-  /** Receives the click so Shift+click can skip the project picker. */
   onNewThread: (event: ReactMouseEvent) => void;
   newThreadDisabled: boolean;
   newThreadShortcutLabel: string | null | undefined;
   newThreadInProjectShortcutLabel: string | null | undefined;
-  /** Shift+click only matters once there is more than one project to pick. */
   showNewThreadInProjectHint: boolean;
   searchInputRef: RefObject<HTMLInputElement | null>;
   searchQuery: string;
@@ -125,9 +105,6 @@ export function SidebarThreadHeader({
           </Button>
         ) : null}
       </div>
-      {/* Unfilled like the search field beside it: the buttons carry their own
-          hover states, and a background well reads far louder on themed
-          palettes than on the base light and dark ones. */}
       <div className="flex shrink-0 items-center">
         {environmentScope}
         {hasProjects ? (
@@ -163,11 +140,6 @@ export function SidebarThreadHeader({
   );
 }
 
-/**
- * Icon button with a tooltip, sized for the header's segmented pair. Spreads
- * unknown props through so it can serve as a popup trigger's render target,
- * which injects its own handlers, ref and aria state.
- */
 export function SidebarHeaderIconButton({
   label,
   tooltip = label,
@@ -175,7 +147,6 @@ export function SidebarHeaderIconButton({
   children,
   ...rest
 }: {
-  /** Accessible name; also the tooltip unless `tooltip` says more. */
   label: string;
   tooltip?: ReactNode;
   className?: string | undefined;
@@ -198,7 +169,6 @@ export function SidebarHeaderIconButton({
         }
       >
         {children}
-        {/* Coarse-pointer hit area, matching the rest of the sidebar chrome. */}
         <span
           aria-hidden
           className="pointer-events-none absolute left-1/2 top-1/2 size-[max(100%,3rem)] -translate-1/2 pointer-fine:hidden"

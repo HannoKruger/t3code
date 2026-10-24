@@ -252,11 +252,9 @@ export function useDesktopUpdateInstall(state: DesktopUpdateState | null) {
     }
     if (!bridge || !state) return;
     setIsPending(true);
-    try {
-      if (await confirmLocalInstall(state)) await installLocalUpdate(bridge);
-    } finally {
-      setIsPending(false);
-    }
+    const confirmed = await confirmLocalInstall(state);
+    if (confirmed) await installLocalUpdate(bridge);
+    setIsPending(false);
   };
 
   return {

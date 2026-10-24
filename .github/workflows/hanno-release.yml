@@ -73,9 +73,17 @@ jobs:
             exit 1
           fi
           # Fetched alone, because FETCH_HEAD names only the first ref of a fetch.
-          git fetch --quiet --no-tags --filter=blob:none origin -- "$BUILD_REF"
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet --no-tags --filter=blob:none origin -- "$BUILD_REF" && break
+            [[ "$attempt" == 5 ]] && exit 1
+            sleep $((attempt * 5))
+          done
           sha="$(git rev-parse FETCH_HEAD)"
-          git fetch --quiet --no-tags --filter=blob:none origin "+refs/heads/hanno:refs/remotes/origin/hanno"
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet --no-tags --filter=blob:none origin "+refs/heads/hanno:refs/remotes/origin/hanno" && break
+            [[ "$attempt" == 5 ]] && exit 1
+            sleep $((attempt * 5))
+          done
           if ! git merge-base --is-ancestor "$sha" origin/hanno; then
             echo "::error::$BUILD_REF ($sha) is not on hanno." >&2
             exit 1
@@ -100,17 +108,25 @@ jobs:
       T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
     steps:
       # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
-      # .repos tree, so this checks out by hand and leaves .repos out.
+      # .repos tree, so this checks out by hand and leaves .repos out. The
+      # self-hosted workspaces persist between runs, so the checkout reuses an
+      # existing repository and cleans it.
       - name: Checkout
         env:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           git init .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$BUILD_SHA"
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" 2>/dev/null ||
+            git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3 4 5; do
+            git fetch --no-tags --depth=1 origin "$BUILD_SHA" && break
+            [[ "$attempt" == 5 ]] && exit 1
+            sleep $((attempt * 5))
+          done
           git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+          git -c checkout.workers=0 checkout --force --detach FETCH_HEAD
+          git clean -ffdx --quiet
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -148,10 +164,12 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$keychain"
           security import "$certificate_bundle" -k "$keychain" -P "$MAC_SELF_SIGNED_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user | tr -d '"' > "$RUNNER_TEMP/original-keychains.txt"
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           security find-certificate -c "$T3CODE_DESKTOP_MAC_SELF_SIGNED_IDENTITY" -p "$keychain" > "$certificate"
           # electron-builder only signs with identities that find-identity -v
           # lists, and a self-signed certificate is listed only once trusted.
+          openssl x509 -in "$certificate" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g' > "$RUNNER_TEMP/trusted-certificate-hash.txt"
           sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$certificate"
           rm -f "$certificate_bundle" "$certificate"
           security find-identity -v -p codesigning "$keychain" | tee "$RUNNER_TEMP/identities.txt"
@@ -183,10 +201,27 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # The import step trusts the signing certificate in the System keychain and
+      # adds a temporary keychain; neither may outlive the job on a persistent Mac.
+      - name: Remove signing certificate and keychain
+        if: always()
+        run: |
+          keychain="$RUNNER_TEMP/hanno-signing.keychain-db"
+          if [[ -f "$RUNNER_TEMP/trusted-certificate-hash.txt" ]]; then
+            sudo security delete-certificate -Z "$(cat "$RUNNER_TEMP/trusted-certificate-hash.txt")" -t /Library/Keychains/System.keychain || true
+          fi
+          if [[ -f "$RUNNER_TEMP/original-keychains.txt" ]]; then
+            xargs security list-keychains -d user -s < "$RUNNER_TEMP/original-keychains.txt" || true
+          fi
+          security delete-keychain "$keychain" || true
+          rm -f "$RUNNER_TEMP/hanno-signing.p12" "$RUNNER_TEMP/hanno-signing.pem"
+
   windows:
     name: Build Windows x64
     needs: prepare
-    runs-on: windows-latest
+    if: github.ref == 'refs/heads/hanno'
+    runs-on: [self-hosted, Windows, X64, hannespc, windows-release]
+    environment: self-hosted-build
     timeout-minutes: 60
     defaults:
       run:
@@ -200,17 +235,25 @@ jobs:
       T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
     steps:
       # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
-      # .repos tree, so this checks out by hand and leaves .repos out.
+      # .repos tree, so this checks out by hand and leaves .repos out. The
+      # self-hosted workspaces persist between runs, so the checkout reuses an
+      # existing repository and cleans it.
       - name: Checkout
         env:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           git init .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$BUILD_SHA"
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" 2>/dev/null ||
+            git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3 4 5; do
+            git fetch --no-tags --depth=1 origin "$BUILD_SHA" && break
+            [[ "$attempt" == 5 ]] && exit 1
+            sleep $((attempt * 5))
+          done
           git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+          git -c checkout.workers=0 checkout --force --detach FETCH_HEAD
+          git clean -ffdx --quiet
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -228,22 +271,17 @@ jobs:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
 
-      # The resource monitor links against the Spectre-mitigated MSVC runtime,
-      # which the runner image does not install.
-      - name: Install Spectre-mitigated MSVC libs
+      # The resource monitor links against the Spectre-mitigated MSVC runtime.
+      # The runner is not an administrator, so the component is installed on the
+      # machine once and this step only checks that it is still there.
+      - name: Check Spectre-mitigated MSVC libs
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $installPath = & $vswhere -products * -latest -property installationPath
-          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
-          $proc = Start-Process -FilePath $setupExe `
-            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
-            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
-            -Wait -PassThru -NoNewWindow
-          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
-            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
-            Write-Error "Visual Studio Installer failed with exit code $code"
-            exit $code
+          $found = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre -property installationPath
+          if (-not $found) {
+            Write-Error "Visual Studio lacks Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre. Install it once on the runner machine."
+            exit 1
           }
 
       - name: Align package versions to release version
@@ -271,11 +309,18 @@ jobs:
 
   # SSH remotes download the archive matching their own platform, so every
   # POSIX key in CLI_ARCHIVE_PLATFORM_KEYS needs one or those hosts get a 404.
-  # node-pty compiles from source on Linux, so arm64 builds on arm64 hardware.
+  # node-pty compiles from source on Linux, so arm64 builds on arm64 hardware,
+  # which GitHub provides free for public repositories. Linux x64 and Windows x64
+  # build on hannespc on just-in-time runners that run one job and are wiped.
+  # Runner labels cannot be restricted on a personal account, so these jobs only
+  # run on the hanno branch, and the self-hosted-build environment (hanno only)
+  # backs that up on GitHub's side.
   server:
     name: Build ${{ matrix.label }} server
     needs: prepare
-    runs-on: ${{ matrix.runner }}
+    if: github.ref == 'refs/heads/hanno'
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    environment: ${{ matrix.environment }}
     timeout-minutes: 45
     defaults:
       run:
@@ -285,26 +330,30 @@ jobs:
       matrix:
         include:
           - label: Linux x64
-            runner: ubuntu-latest
+            runner: '["self-hosted", "Linux", "X64", "hannespc", "linux-release"]'
+            environment: self-hosted-build
             platform: linux
             arch: x64
             platform_key: linux-x64
             rust_target: x86_64-unknown-linux-gnu
           - label: Linux arm64
-            runner: ubuntu-24.04-arm
+            runner: '"ubuntu-24.04-arm"'
+            environment: self-hosted-build
             platform: linux
             arch: arm64
             platform_key: linux-arm64
             rust_target: aarch64-unknown-linux-gnu
           - label: macOS arm64
-            runner: macos-latest
+            runner: '"macos-latest"'
+            environment: self-hosted-build
             platform: mac
             arch: arm64
             platform_key: darwin-arm64
             rust_target: aarch64-apple-darwin
           # Windows SSH remotes run Git Bash, which installs this zip.
           - label: Windows x64
-            runner: windows-latest
+            runner: '["self-hosted", "Windows", "X64", "hannespc", "windows-release"]'
+            environment: self-hosted-build
             platform: win
             arch: x64
             platform_key: win32-x64
@@ -326,10 +375,16 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$BUILD_SHA"
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" 2>/dev/null ||
+            git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3 4 5; do
+            git fetch --no-tags --depth=1 origin "$BUILD_SHA" && break
+            [[ "$attempt" == 5 ]] && exit 1
+            sleep $((attempt * 5))
+          done
           git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+          git -c checkout.workers=0 checkout --force --detach FETCH_HEAD
+          git clean -ffdx --quiet
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -360,23 +415,18 @@ jobs:
           VP_NODE_VERSION: "26.8.2"
         run: node apps/server/scripts/cli.ts build-exe --verbose
 
-      # The resource monitor links against the Spectre-mitigated MSVC runtime,
-      # which the runner image does not install.
-      - name: Install Spectre-mitigated MSVC libs
+      # The resource monitor links against the Spectre-mitigated MSVC runtime.
+      # The runner is not an administrator, so the component is installed on the
+      # machine once and this step only checks that it is still there.
+      - name: Check Spectre-mitigated MSVC libs
         if: matrix.platform == 'win'
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $installPath = & $vswhere -products * -latest -property installationPath
-          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
-          $proc = Start-Process -FilePath $setupExe `
-            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
-            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
-            -Wait -PassThru -NoNewWindow
-          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
-            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
-            Write-Error "Visual Studio Installer failed with exit code $code"
-            exit $code
+          $found = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre -property installationPath
+          if (-not $found) {
+            Write-Error "Visual Studio lacks Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre. Install it once on the runner machine."
+            exit 1
           }
 
       - name: Build resource monitor

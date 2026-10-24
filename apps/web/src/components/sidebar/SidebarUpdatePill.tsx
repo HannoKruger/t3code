@@ -1,7 +1,8 @@
 import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
 import { TriangleAlertIcon } from "lucide-react";
-import { type ComponentProps, useCallback, useEffect, useId, useRef, useState } from "react";
+import { type ComponentProps, useEffect, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
+import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { isElectron } from "../../env";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { cn } from "../../lib/utils";
@@ -14,6 +15,7 @@ import {
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateDownloadedVersion,
+  getDesktopUpdateIdleTooltip,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
@@ -47,22 +49,21 @@ type SidebarUpdatePopoverChangeDetails = Parameters<
 >[1];
 type SidebarUpdatePopoverHandle = ReturnType<typeof PopoverCreateHandle>;
 
-export function shouldUseSidebarUpdateReleaseNotesPopover(
+function shouldUseSidebarUpdateReleaseNotesPopover(
   showUpdateDetails: boolean,
   state: DesktopUpdateState | null,
 ): boolean {
   return showUpdateDetails && state?.channel === "nightly" && state.releaseNotes.length > 0;
 }
 
-export function handleSidebarUpdateReleaseNotesPopoverOpenChange(
+function handleSidebarUpdateReleaseNotesPopoverOpenChange(
   _open: boolean,
   details: Pick<SidebarUpdatePopoverChangeDetails, "reason" | "cancel">,
 ): void {
-  // The trigger is the update action, so its presses must not also toggle the Popover.
   if (details.reason === "trigger-press") details.cancel();
 }
 
-export function openSidebarUpdateReleaseNotesPopoverOnForwardTab(
+function openSidebarUpdateReleaseNotesPopoverOnForwardTab(
   event: { readonly key: string; readonly shiftKey: boolean },
   handle: Pick<SidebarUpdatePopoverHandle, "open">,
   triggerId: string,
@@ -80,9 +81,7 @@ function resolveSidebarUpdatePresentation({
   showCheckIcon,
 }: {
   readonly action: ReturnType<typeof resolveDesktopUpdateButtonAction>;
-  /** Remote work is waiting, and this app is not downloading. */
   readonly showsEverything: boolean;
-  /** The running "update everything" pass. Its state sets the icon. */
   readonly run: UpdateEverythingRun | null;
   readonly isDownloading: boolean;
   readonly showCheckIcon: boolean;
@@ -135,8 +134,6 @@ const toastUpdateError: ReportLocalUpdateError = (title, description) => {
   toastManager.add(stackedThreadToast({ type: "error", title, description }));
 };
 
-/** Downloads this app's update. Resolves true when it is ready to install;
-    failures go to `reportError` (a toast by default) and resolve false. */
 async function downloadLocalUpdate(
   bridge: DesktopBridge,
   {
@@ -163,10 +160,6 @@ async function downloadLocalUpdate(
   }
 }
 
-/** Installs this app's downloaded update, which relaunches the app. Resolves
-    true when the relaunch is under way. Failures go to `reportError` (a toast
-    by default). A refused install (the download is not marked ready yet)
-    leaves the restart to the user. */
 async function installLocalUpdate(
   bridge: DesktopBridge,
   reportError: ReportLocalUpdateError = toastUpdateError,
@@ -227,8 +220,8 @@ export function useDesktopUpdateInstall(state: DesktopUpdateState | null) {
     const bridge = window.desktopBridge;
     setIsConfirmingEverything(false);
     setIsPending(true);
-    try {
-      await everything.run({
+    const result = await settlePromise(() =>
+      everything.run({
         ...(bridge && action === "download"
           ? {
               downloadLocal: (reportError) =>
@@ -238,15 +231,16 @@ export function useDesktopUpdateInstall(state: DesktopUpdateState | null) {
         ...(bridge && action !== "none"
           ? { installLocal: (reportError) => installLocalUpdate(bridge, reportError) }
           : {}),
-      });
-    } catch (error) {
+      }),
+    );
+    if (result._tag === "Failure") {
+      const error = squashAtomCommandFailure(result);
       toastUpdateError(
         "Could not update everything",
         error instanceof Error ? error.message : "An unexpected error occurred.",
       );
-    } finally {
-      setIsPending(false);
     }
+    setIsPending(false);
   };
 
   const install = async () => {
@@ -258,11 +252,9 @@ export function useDesktopUpdateInstall(state: DesktopUpdateState | null) {
     }
     if (!bridge || !state) return;
     setIsPending(true);
-    try {
-      if (await confirmLocalInstall(state)) await installLocalUpdate(bridge);
-    } finally {
-      setIsPending(false);
-    }
+    const confirmed = await confirmLocalInstall(state);
+    if (confirmed) await installLocalUpdate(bridge);
+    setIsPending(false);
   };
 
   return {
@@ -298,26 +290,33 @@ function SidebarUpdateControl() {
   const state = useDesktopUpdateState();
   const [isActionPending, setIsActionPending] = useState(false);
   const [checkAnimationKey, setCheckAnimationKey] = useState(0);
-  const [isCheckAnimationLatched, setIsCheckAnimationLatched] = useState(false);
   const [releaseNotesPopoverHandle] = useState(() => PopoverCreateHandle());
   const suppressReleaseNotesFocusOpen = useRef(false);
   const releaseNotesPopupRef = useRef<HTMLDivElement>(null);
   const releaseNotesTriggerId = useId();
   const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
 
-  useEffect(() => {
+  const updateStatus = state?.status;
+  const [isCheckAnimationLatched, setIsCheckAnimationLatched] = useState(
+    () => !prefersReducedMotion && updateStatus === "checking",
+  );
+  const [latchInputs, setLatchInputs] = useState({ prefersReducedMotion, updateStatus });
+  if (
+    latchInputs.prefersReducedMotion !== prefersReducedMotion ||
+    latchInputs.updateStatus !== updateStatus
+  ) {
+    setLatchInputs({ prefersReducedMotion, updateStatus });
     if (prefersReducedMotion) {
       setIsCheckAnimationLatched(false);
-    } else if (state?.status === "checking") {
+    } else if (updateStatus === "checking") {
       setIsCheckAnimationLatched(true);
     }
-  }, [prefersReducedMotion, state?.status]);
+  }
 
   const installer = useDesktopUpdateInstall(state);
   const { action, localUpdateVersion, everything } = installer;
   const isDownloading = state?.status === "downloading";
   const runsEverything = everything.hasUpdates && !isDownloading;
-  // Providers leave the list once queued, so the run keeps its own state.
   const run = useUpdateEverythingRun();
   const isRunningEverything = run !== null;
   const showCheckIcon = shouldShowDesktopUpdateCheckIcon({
@@ -332,6 +331,8 @@ function SidebarUpdateControl() {
     isDownloading,
     showCheckIcon,
   });
+  const idleTooltip =
+    !showUpdateDetails && !showCheckIcon ? getDesktopUpdateIdleTooltip(state) : null;
   const tooltip = runsEverything
     ? everything.summary
     : showUpdateDetails
@@ -340,7 +341,7 @@ function SidebarUpdateControl() {
         : "Update available"
       : showCheckIcon
         ? "Checking for updates…"
-        : "Check for updates";
+        : (idleTooltip?.title ?? "Check for updates");
   const disabled = showCheckIcon
     ? true
     : runsEverything
@@ -366,7 +367,7 @@ function SidebarUpdateControl() {
     }
   }, [releaseNotesPopoverHandle, releaseNotesTriggerId, showReleaseNotesPopover]);
 
-  const handleAction = useCallback(() => {
+  const handleAction = () => {
     const bridge = window.desktopBridge;
     if (isInteractionDisabled) return;
 
@@ -417,18 +418,17 @@ function SidebarUpdateControl() {
         );
       })
       .finally(() => setIsActionPending(false));
-  }, [action, installer, isInteractionDisabled, prefersReducedMotion, runsEverything, state]);
+  };
 
-  const handleCheckAnimationIteration = useCallback(() => {
+  const handleCheckAnimationIteration = () => {
     setIsCheckAnimationLatched(
       shouldContinueDesktopUpdateCheckAnimation({
         isChecking: state?.status === "checking",
         prefersReducedMotion,
       }),
     );
-  }, [prefersReducedMotion, state?.status]);
+  };
 
-  // Web has no local app to check, so it only shows the button for remote work.
   if (!isElectron && !runsEverything && !isRunningEverything) return null;
 
   const statusIcon = (
@@ -455,12 +455,9 @@ function SidebarUpdateControl() {
           run={run}
           local={local}
           icon={statusIcon}
-          // After "Later", this app's downloaded update can still be installed
-          // while the run follows the other machines.
           {...(run.localVersion === null && action === "install" && window.desktopBridge
             ? {
                 onRestart: async () => {
-                  // Like the countdown, keep following servers still restarting.
                   saveUpdateEverythingResult({
                     localVersion: localUpdateVersion,
                     updatedServers: 0,
@@ -483,7 +480,7 @@ function SidebarUpdateControl() {
   const updateButton = (
     <button
       type="button"
-      aria-label={tooltip}
+      aria-label={idleTooltip?.detail ? `${tooltip}: ${idleTooltip.detail}` : tooltip}
       aria-disabled={isInteractionDisabled || undefined}
       className={cn(
         "inline-flex size-8 items-center justify-center rounded-full outline-hidden ring-ring transition-colors focus-visible:ring-2 focus-visible:ring-inset",
@@ -562,7 +559,14 @@ function SidebarUpdateControl() {
               side="top"
               variant={showUpdateDetails ? "glass" : "default"}
             >
-              <span className="whitespace-pre-line">{tooltip}</span>
+              {idleTooltip?.detail ? (
+                <div className="text-left">
+                  <div className="font-medium">{idleTooltip.title}</div>
+                  <div className="text-muted-foreground">{idleTooltip.detail}</div>
+                </div>
+              ) : (
+                <span className="whitespace-pre-line">{tooltip}</span>
+              )}
             </TooltipPopup>
           ) : null}
         </Tooltip>

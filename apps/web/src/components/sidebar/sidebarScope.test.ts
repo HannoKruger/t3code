@@ -16,6 +16,7 @@ import {
   filterSidebarScopeThreads,
   resolveSidebarScope,
   sidebarScopeIncludes,
+  sidebarScopeMatchingProjectKeys,
   sidebarScopeProjectKeys,
   sidebarScopeSearchEnvironmentIds,
   type SidebarScopeFilter,
@@ -251,6 +252,35 @@ describe("sidebarScopeIncludes", () => {
 });
 
 type SidebarRosterThread = Parameters<typeof filterSidebarScopeThreads>[0][number];
+
+describe("sidebarScopeMatchingProjectKeys", () => {
+  const projects = [
+    { environmentId: laptop, projectId: ProjectId.make("app") },
+    { environmentId: desk, projectId: ProjectId.make("app") },
+    { environmentId: laptop, projectId: ProjectId.make("scratch") },
+  ];
+
+  it("hides nothing when neither axis is set", () => {
+    expect(
+      sidebarScopeMatchingProjectKeys(projects, { environmentId: null, projectKeys: null }),
+    ).toBeNull();
+  });
+
+  it("lists every project of the scoped environment, including ones no group knows", () => {
+    expect(
+      sidebarScopeMatchingProjectKeys(projects, { environmentId: laptop, projectKeys: null }),
+    ).toEqual(new Set(["laptop:app", "laptop:scratch"]));
+  });
+
+  it("requires both axes when both are set", () => {
+    expect(
+      sidebarScopeMatchingProjectKeys(projects, {
+        environmentId: laptop,
+        projectKeys: new Set(["laptop:app", "desk:app"]),
+      }),
+    ).toEqual(new Set(["laptop:app"]));
+  });
+});
 
 describe("filterSidebarScopeThreads", () => {
   const thread = (

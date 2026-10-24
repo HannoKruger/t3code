@@ -100,17 +100,21 @@ jobs:
       T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
     steps:
       # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
-      # .repos tree, so this checks out by hand and leaves .repos out.
+      # .repos tree, so this checks out by hand and leaves .repos out. The
+      # self-hosted workspaces persist between runs, so the checkout reuses an
+      # existing repository and cleans it.
       - name: Checkout
         env:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           git init .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" 2>/dev/null ||
+            git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git fetch --no-tags --depth=1 origin "$BUILD_SHA"
           git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+          git -c checkout.workers=0 checkout --force --detach FETCH_HEAD
+          git clean -ffdx --quiet
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -186,7 +190,8 @@ jobs:
   windows:
     name: Build Windows x64
     needs: prepare
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64, hannespc, windows-release]
+    environment: self-hosted-build
     timeout-minutes: 60
     defaults:
       run:
@@ -200,17 +205,21 @@ jobs:
       T3CODE_RELAY_URL: ${{ vars.RELAY_URL }}
     steps:
       # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
-      # .repos tree, so this checks out by hand and leaves .repos out.
+      # .repos tree, so this checks out by hand and leaves .repos out. The
+      # self-hosted workspaces persist between runs, so the checkout reuses an
+      # existing repository and cleans it.
       - name: Checkout
         env:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -euo pipefail
           git init .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" 2>/dev/null ||
+            git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git fetch --no-tags --depth=1 origin "$BUILD_SHA"
           git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+          git -c checkout.workers=0 checkout --force --detach FETCH_HEAD
+          git clean -ffdx --quiet
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -228,22 +237,17 @@ jobs:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
 
-      # The resource monitor links against the Spectre-mitigated MSVC runtime,
-      # which the runner image does not install.
-      - name: Install Spectre-mitigated MSVC libs
+      # The resource monitor links against the Spectre-mitigated MSVC runtime.
+      # The runner is not an administrator, so the component is installed on the
+      # machine once and this step only checks that it is still there.
+      - name: Check Spectre-mitigated MSVC libs
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $installPath = & $vswhere -products * -latest -property installationPath
-          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
-          $proc = Start-Process -FilePath $setupExe `
-            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
-            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
-            -Wait -PassThru -NoNewWindow
-          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
-            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
-            Write-Error "Visual Studio Installer failed with exit code $code"
-            exit $code
+          $found = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre -property installationPath
+          if (-not $found) {
+            Write-Error "Visual Studio lacks Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre. Install it once on the runner machine."
+            exit 1
           }
 
       - name: Align package versions to release version
@@ -271,11 +275,15 @@ jobs:
 
   # SSH remotes download the archive matching their own platform, so every
   # POSIX key in CLI_ARCHIVE_PLATFORM_KEYS needs one or those hosts get a 404.
-  # node-pty compiles from source on Linux, so arm64 builds on arm64 hardware.
+  # node-pty compiles from source on Linux, so arm64 builds on arm64 hardware,
+  # which GitHub provides free for public repositories. Linux x64 and Windows x64
+  # build on hannespc. The self-hosted-build environment only allows the hanno
+  # branch, so a branch cannot point these runners at its own workflow copy.
   server:
     name: Build ${{ matrix.label }} server
     needs: prepare
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    environment: ${{ matrix.environment }}
     timeout-minutes: 45
     defaults:
       run:
@@ -285,26 +293,30 @@ jobs:
       matrix:
         include:
           - label: Linux x64
-            runner: ubuntu-latest
+            runner: '["self-hosted", "Linux", "X64", "hannespc", "linux-release"]'
+            environment: self-hosted-build
             platform: linux
             arch: x64
             platform_key: linux-x64
             rust_target: x86_64-unknown-linux-gnu
           - label: Linux arm64
-            runner: ubuntu-24.04-arm
+            runner: '"ubuntu-24.04-arm"'
+            environment: self-hosted-build
             platform: linux
             arch: arm64
             platform_key: linux-arm64
             rust_target: aarch64-unknown-linux-gnu
           - label: macOS arm64
-            runner: macos-latest
+            runner: '"macos-latest"'
+            environment: self-hosted-build
             platform: mac
             arch: arm64
             platform_key: darwin-arm64
             rust_target: aarch64-apple-darwin
           # Windows SSH remotes run Git Bash, which installs this zip.
           - label: Windows x64
-            runner: windows-latest
+            runner: '["self-hosted", "Windows", "X64", "hannespc", "windows-release"]'
+            environment: self-hosted-build
             platform: win
             arch: x64
             platform_key: win32-x64
@@ -326,10 +338,12 @@ jobs:
         run: |
           set -euo pipefail
           git init .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" 2>/dev/null ||
+            git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git fetch --no-tags --depth=1 origin "$BUILD_SHA"
           git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+          git -c checkout.workers=0 checkout --force --detach FETCH_HEAD
+          git clean -ffdx --quiet
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -360,23 +374,18 @@ jobs:
           VP_NODE_VERSION: "26.8.2"
         run: node apps/server/scripts/cli.ts build-exe --verbose
 
-      # The resource monitor links against the Spectre-mitigated MSVC runtime,
-      # which the runner image does not install.
-      - name: Install Spectre-mitigated MSVC libs
+      # The resource monitor links against the Spectre-mitigated MSVC runtime.
+      # The runner is not an administrator, so the component is installed on the
+      # machine once and this step only checks that it is still there.
+      - name: Check Spectre-mitigated MSVC libs
         if: matrix.platform == 'win'
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $installPath = & $vswhere -products * -latest -property installationPath
-          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
-          $proc = Start-Process -FilePath $setupExe `
-            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
-            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
-            -Wait -PassThru -NoNewWindow
-          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
-            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
-            Write-Error "Visual Studio Installer failed with exit code $code"
-            exit $code
+          $found = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre -property installationPath
+          if (-not $found) {
+            Write-Error "Visual Studio lacks Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre. Install it once on the runner machine."
+            exit 1
           }
 
       - name: Build resource monitor

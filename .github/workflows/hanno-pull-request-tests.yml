@@ -22,7 +22,11 @@ env:
 jobs:
   test:
     name: Test pull request
-    runs-on: ubuntu-latest
+    # Runs the pull request's code on a persistent machine, so only branches of
+    # this repository get it. Pull requests from forks are rejected by
+    # hanno-pull-request-check.yml and never reach the self-hosted runner.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, hannespc, linux-release]
     timeout-minutes: 30
     steps:
       # actions/checkout's cleanup fails on the orphaned gitlinks in the vendored
@@ -33,10 +37,12 @@ jobs:
         run: |
           set -euo pipefail
           git init --quiet .
-          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" 2>/dev/null ||
+            git remote set-url origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git fetch --quiet --no-tags origin "$HEAD_SHA"
           git sparse-checkout set --no-cone '/*' '!/.repos/'
-          git -c checkout.workers=0 checkout --quiet --detach "$HEAD_SHA"
+          git -c checkout.workers=0 checkout --quiet --force --detach "$HEAD_SHA"
+          git clean -ffdx --quiet
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
